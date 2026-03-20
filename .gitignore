@@ -1,0 +1,46 @@
+# Dependencies
+node_modules/
+bun.lock
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Compiled documents
+*.pdf
+*.aux
+*.log
+*.out
+*.synctex.gz
+*.fls
+*.fdb_latexmk
+
+# Personal data (never commit these)
+salary_data.json
+job_scraper/seen_jobs.json
+job_scraper/*.md
+*_BehavioralReport.pdf
+linkedin_Profile.pdf
+
+# Personal photos and signatures
+*.jpg
+*.jpeg
+*.png
+!cover_letters/OpenFonts/fonts/**
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+
+# Memory files (Claude Code user-specific)
+.claude/projects/
+
+# Skills lock (auto-generated)
+skills-lock.json
