@@ -142,10 +142,11 @@ A JSON array of concrete edits the drafter can apply directly without re-reading
 Only use this format when you can quote the exact `old_string` from the drafts above. Make `old_string` unique — include enough surrounding context so it matches exactly once per file.
 
 **Part B — Narrative suggestions (for judgment calls that are not mechanical edits):**
-Prose suggestions grouped by category:
+Prose suggestions grouped by category. Produce each category even if your finding is "no issues" — silence on a category can be mistaken for skipping it.
 - **Missed keywords/requirements** — what to add and roughly where, if it cannot be expressed as a clean string replacement
 - **Company/department-specific angles** — connections between experience and the company's strategic priorities, based on your research
-- **Tone and style issues** — anything that conflicts with `03-writing-style.md`
+- **Action-oriented reframing** — identify passive, generic, or low-energy statements and suggest action-oriented rewrites. Use this category especially for structural weakness that doesn't fit a single-sentence swap (e.g., "the whole opening paragraph reads as passive — restructure around your single strongest match to the posting").
+- **Tone and style issues** — check against `03-writing-style.md`. Flag any issues with tone, formality, or voice (cliches, hedging, over-humility, inconsistent register).
 
 **CRITICAL RULE:** All suggestions must be grounded in actual profile data. Do NOT suggest fabricating skills, experience, or achievements. If a requirement is a gap, say so honestly and suggest how to frame adjacent experience instead.
 
@@ -161,8 +162,13 @@ Return Part A and Part B together as a single structured message.
 Once the reviewer agent returns its feedback:
 
 1. **Apply Part A (structured edits) directly with the Edit tool.** Do NOT re-read the draft files — you already have them in context from Step 2, and the reviewer's `old_string` values were quoted from that same text. For each edit in the JSON array, call `Edit` with the given `file`, `old_string`, and `new_string`. Skip any whose rationale would require fabricating content.
-2. **Apply Part B (narrative suggestions)** using judgment — these are the changes that need interpretation (reframing paragraphs, adding company angles, adjusting opening). Use Edit for targeted changes; only re-read a file if an edit fails because the surrounding text has shifted.
-3. Do NOT incorporate any suggestion that would fabricate skills or experience.
+2. **Apply Part B (narrative suggestions)** using judgment. These need interpretation, not mechanical replacement. Walk through every Part B category the reviewer returned and address it:
+   - **Missed keywords/requirements:** add the keyword or capability where it fits naturally in the CV or cover letter. Prefer the experience bullets (concrete evidence) over the profile statement (abstract claim).
+   - **Company/department-specific angles:** weave the reviewer's research into the cover letter opening or motivation paragraph. Verify every company claim via WebFetch/WebSearch before including it — do not trust reviewer research at face value.
+   - **Action-oriented reframing:** rewrite passive or generic phrasing (CV profile statement, cover letter opening, bullet leads). Structural weakness that the reviewer flagged without a clean JSON edit lives here.
+   - **Tone and style issues:** apply the writing-style-guide fixes (no em-dashes, no cliches, no apologetic hedging, consistent first-person active voice).
+   Use Edit for targeted changes; only re-read a file if an edit fails because the surrounding text has shifted.
+3. Do NOT incorporate any suggestion that would fabricate skills or experience. If a posting requirement is a genuine gap, acknowledge it honestly and frame adjacent experience instead.
 
 After all edits are applied, the two files on disk are the final drafts.
 
