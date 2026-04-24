@@ -85,7 +85,7 @@ Write both files to disk. Keep the exact text of both drafts in working memory �
 
 ## Step 3: REVIEWER - Research & Critique
 
-Use the **Agent tool** to spawn a `general-purpose` reviewer agent. The reviewer gets a fresh context, so pass the drafts **inline in the prompt** below (do not make the reviewer Read them). Scope the reviewer's file reads to content-critique essentials only — the reviewer does not need the LaTeX template files (`05`, `06`) or the behavioral profile (`02`) to critique content.
+Use the **Agent tool** to spawn a `general-purpose` reviewer agent. The reviewer gets a fresh context, so pass the drafts **inline in the prompt** below (do not make the reviewer Read them). Scope the reviewer's file reads to content-critique essentials only — the reviewer does not need the LaTeX template files (`05`, `06`) to critique content, since those govern structural/LaTeX concerns the drafter already applied.
 
 Replace `<COMPANY>`, `<ROLE>`, `<INSERT_JOB_POSTING_TEXT_HERE>`, `<INSERT_CV_DRAFT_HERE>`, and `<INSERT_COVER_LETTER_DRAFT_HERE>` with actual values before dispatching.
 
@@ -102,12 +102,13 @@ Use WebSearch and WebFetch to research:
 - Company culture and values
 
 ### 2. Read Reference Materials (content-critique only)
-Read these three files — and only these — to ground your critique:
+Read these four files — and only these — to ground your critique:
 - `.claude/skills/job-application-assistant/01-candidate-profile.md`
+- `.claude/skills/job-application-assistant/02-behavioral-profile.md` — use this specifically to check whether the cover letter's voice matches the candidate's natural register. A "Collaborator" PI profile, for example, should not be given a combative, solo-hero tone; a "Persuader" profile should not be given over-hedged, apologetic phrasing.
 - `.claude/skills/job-application-assistant/03-writing-style.md`
 - `.claude/skills/job-application-assistant/04-job-evaluation.md`
 
-Do NOT read `02-behavioral-profile.md`, `05-cv-templates.md`, or `06-cover-letter-templates.md` — those are structural/behavioral references the drafter already applied and are not needed for content critique.
+Do NOT read `05-cv-templates.md` or `06-cover-letter-templates.md` — those govern LaTeX structure the drafter already applied and are not needed for content critique.
 
 ### 3. Drafts to Review
 Both drafts are provided inline below. Do NOT use the Read tool on the draft files — use these exact texts.
@@ -146,7 +147,7 @@ Prose suggestions grouped by category. Produce each category even if your findin
 - **Missed keywords/requirements** — what to add and roughly where, if it cannot be expressed as a clean string replacement
 - **Company/department-specific angles** — connections between experience and the company's strategic priorities, based on your research
 - **Action-oriented reframing** — identify passive, generic, or low-energy statements and suggest action-oriented rewrites. Use this category especially for structural weakness that doesn't fit a single-sentence swap (e.g., "the whole opening paragraph reads as passive — restructure around your single strongest match to the posting").
-- **Tone and style issues** — check against `03-writing-style.md`. Flag any issues with tone, formality, or voice (cliches, hedging, over-humility, inconsistent register).
+- **Tone and style issues** — check against `03-writing-style.md` AND `02-behavioral-profile.md`. Flag any issues with tone, formality, or voice (cliches, hedging, over-humility, inconsistent register), and specifically flag any mismatch between the letter's voice and the candidate's natural register as described in the behavioral profile.
 
 **CRITICAL RULE:** All suggestions must be grounded in actual profile data. Do NOT suggest fabricating skills, experience, or achievements. If a requirement is a gap, say so honestly and suggest how to frame adjacent experience instead.
 
