@@ -52,8 +52,8 @@ Or manually: fork on GitHub, then clone your fork.
 ## 3. Install job search CLI dependencies
 
 ```bash
-for tool in jobbank-search jobdanmark-search jobindex-search jobnet-search; do
-  cd .agents/skills/$tool/cli && bun install && cd ../../../..
+for tool in jobbank-search jobdanmark-search jobindex-search jobnet-search jobfinder-lu-search jobs-ch-search workforce-au-search jobbank-ca-search; do
+  cd .claude/skills/$tool/cli && bun install && cd ../../../..
 done
 ```
 

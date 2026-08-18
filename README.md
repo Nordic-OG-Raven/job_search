@@ -47,10 +47,14 @@ cd ai-job-search
 ### 2. Install job search tools
 
 ```bash
-cd .agents/skills/jobbank-search/cli && bun install && cd ../../../..
-cd .agents/skills/jobdanmark-search/cli && bun install && cd ../../../..
-cd .agents/skills/jobindex-search/cli && bun install && cd ../../../..
-cd .agents/skills/jobnet-search/cli && bun install && cd ../../../..
+cd .claude/skills/jobbank-search/cli && bun install && cd ../../../..
+cd .claude/skills/jobdanmark-search/cli && bun install && cd ../../../..
+cd .claude/skills/jobindex-search/cli && bun install && cd ../../../..
+cd .claude/skills/jobnet-search/cli && bun install && cd ../../../..
+cd .claude/skills/jobfinder-lu-search/cli && bun install && cd ../../../..
+cd .claude/skills/jobs-ch-search/cli && bun install && cd ../../../..
+cd .claude/skills/workforce-au-search/cli && bun install && cd ../../../..
+cd .claude/skills/jobbank-ca-search/cli && bun install && cd ../../../..
 ```
 
 ### 3. Set up your profile
@@ -116,13 +120,16 @@ ai-job-search/
 │   │   │   ├── 06-cover-letter-templates.md # LaTeX cover letter templates
 │   │   │   └── 07-interview-prep.md   # STAR examples + interview framework
 │   │   ├── job-scraper/               # Job search orchestration
-│   │   └── upskill/                   # /upskill skill gap analysis and learning plan
+│   │   ├── upskill/                   # /upskill skill gap analysis and learning plan
+│   │   ├── jobbank-search/            # Akademikernes Jobbank (Denmark) CLI tool
+│   │   ├── jobdanmark-search/         # Jobdanmark.dk (Denmark) CLI tool
+│   │   ├── jobindex-search/           # Jobindex.dk (Denmark) CLI tool
+│   │   ├── jobnet-search/             # Jobnet.dk (Denmark, government portal) CLI tool
+│   │   ├── jobfinder-lu-search/       # Jobfinder.lu (Luxembourg) CLI tool
+│   │   ├── jobs-ch-search/            # jobs.ch (Switzerland) CLI tool
+│   │   ├── workforce-au-search/       # Workforce Australia CLI tool
+│   │   └── jobbank-ca-search/         # Job Bank (Canada) CLI tool
 │   └── settings.local.json            # Claude Code permissions
-├── .agents/skills/                    # Job portal CLI tools (Denmark)
-│   ├── jobbank-search/                # Akademikernes Jobbank
-│   ├── jobdanmark-search/             # Jobdanmark.dk
-│   ├── jobindex-search/               # Jobindex.dk
-│   └── jobnet-search/                 # Jobnet.dk (government portal)
 ├── cv/
 │   └── main_example.tex               # moderncv LaTeX template
 ├── cover_letters/
@@ -198,7 +205,7 @@ The CV uses [moderncv](https://ctan.org/pkg/moderncv) (banking style). The cover
 
 ### Job search tools
 
-The four CLI tools in `.agents/skills/` are specific to the **Danish job market** (Jobbank, Jobdanmark, Jobindex, Jobnet). They demonstrate the pattern for building job portal integrations. If you're in a different country, you can build equivalent tools for your local job portals using the same structure.
+Each `*-search` skill under `.claude/skills/` is a self-contained job portal CLI tool with its own `SKILL.md` (trigger phrases + invocation) and a Bun/TypeScript CLI under `cli/`. Four cover the Danish job market (Jobbank, Jobdanmark, Jobindex, Jobnet); four more cover Luxembourg (Jobfinder.lu), Switzerland (jobs.ch), Australia (Workforce Australia), and Canada (Job Bank). They demonstrate the pattern for building job portal integrations — if you're in a different country, you can build equivalent tools for your local job portals using the same structure (a `SKILL.md` with trigger phrases under `.claude/skills/<name>/`, plus a `cli/` directory with the CLI implementation).
 
 ### Salary benchmarking
 

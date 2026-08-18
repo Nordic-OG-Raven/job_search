@@ -12,6 +12,11 @@
    - **Flag it:** Combining academic + industry experience into a single claim that implies it was all industry; describing work using the posting's specific terminology when the actual work was adjacent but not the same.
    - **Never:** Claiming experience the candidate doesn't have; implying they worked in a domain they haven't.
    When a bullet falls in the "flag it" zone, present it to the user after drafting with: "This bullet is a stretch because X. Keep, soften, or drop?" If the evaluation experience match score is below 50, warn before proceeding to drafting that extensive reframing would be needed.
+7. **Respect proficiency tiers from `01-candidate-profile.md`.** Technical skills there are tagged Proficient / Working Knowledge / Familiar-Exposure.
+   - **Proficient** items can be headlined and described with confidence and depth.
+   - **Working Knowledge** items can be mentioned as applied experience ("built X using Y"), but avoid language implying mastery ("expert in", "advanced", "extensive experience with").
+   - **Familiar / Exposure** items should only appear briefly if directly relevant to the posting (to show awareness), never as a headline or primary selling point, and never as the basis for "Strong Fit" framing. If a posting's core requirements are mostly Familiar-tier items for the candidate, treat that as a stretch role per the Experience Match guidance in `04-job-evaluation.md`.
+   Overclaiming depth on a Familiar-tier item will fall apart under interview follow-up questions, especially in the Danish market where this reads as suspicious.
 
 ## Tone
 - **Warm but direct.** Friendly and approachable, but confident without arrogance.

@@ -64,6 +64,3 @@ job_search_tracker.csv
 
 # Upskill reports (personal output)
 upskill/*.md
-
-# Agent usage logs
-.agents/
