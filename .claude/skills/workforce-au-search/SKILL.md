@@ -15,10 +15,19 @@ description: >
   part time job australia, casual job australia, NSW job, VIC job, QLD job, WA job,
   SA job, TAS job, ACT job, NT job.
 context: fork
-allowed-tools: Bash(bun run skills/workforce-au-search/cli/src/cli.ts *), Read(CLAUDE.md), Read(.claude/skills/job-application-assistant/08-search-fit-filter.md)
+allowed-tools: Bash(scripts/bun_guarded.py .claude/skills/workforce-au-search/cli/src/cli.ts *), Read(CLAUDE.md), Read(.claude/skills/job-application-assistant/08-search-fit-filter.md)
+disallowed-tools: WebSearch WebFetch Agent
 ---
 
 # Workforce Australia Search Skill
+
+## If the CLI command fails
+
+If the `bun run` command above returns a non-zero exit code, an `{"error": ...}` JSON
+payload, or gets denied by a permission prompt: **stop and report the exact error to
+the user verbatim**. Do not substitute results from WebSearch, WebFetch, the Indeed
+MCP tools, or any other source — a silent fallback mixes data sources and misleads
+the user about where results came from.
 
 ## Before presenting results: candidate fit filter
 
@@ -49,7 +58,7 @@ Invoke this skill when the user wants to:
 ### Search job listings
 
 ```bash
-bun run skills/workforce-au-search/cli/src/cli.ts search [flags]
+scripts/bun_guarded.py .claude/skills/workforce-au-search/cli/src/cli.ts search [flags]
 ```
 
 Key flags:
@@ -63,7 +72,7 @@ Key flags:
 ### Full job detail
 
 ```bash
-bun run skills/workforce-au-search/cli/src/cli.ts detail <vacancyId> [--format json|plain]
+scripts/bun_guarded.py .claude/skills/workforce-au-search/cli/src/cli.ts detail <vacancyId> [--format json|plain]
 ```
 
 `vacancyId` is the numeric ID returned as `vacancyId` in `search` results. Returns
@@ -98,21 +107,21 @@ complete description.
 ### Python jobs in Sydney
 
 ```bash
-bun run skills/workforce-au-search/cli/src/cli.ts search \
+scripts/bun_guarded.py .claude/skills/workforce-au-search/cli/src/cli.ts search \
   --search-text python --city sydney --limit 25 --format table
 ```
 
 ### Most recent jobs nationwide
 
 ```bash
-bun run skills/workforce-au-search/cli/src/cli.ts search \
+scripts/bun_guarded.py .claude/skills/workforce-au-search/cli/src/cli.ts search \
   --sort date-desc --limit 25 --format table
 ```
 
 ### Full details for a specific job posting
 
 ```bash
-bun run skills/workforce-au-search/cli/src/cli.ts detail 2350265551 --format plain
+scripts/bun_guarded.py .claude/skills/workforce-au-search/cli/src/cli.ts detail 2350265551 --format plain
 ```
 
 ---

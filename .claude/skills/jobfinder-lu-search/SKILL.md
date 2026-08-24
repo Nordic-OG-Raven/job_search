@@ -16,10 +16,19 @@ description: >
   job esch-sur-alzette, job luxembourg city, job kirchberg, job belval,
   cross-border job luxembourg, frontalier job.
 context: fork
-allowed-tools: Bash(bun run skills/jobfinder-lu-search/cli/src/cli.ts *), Read(CLAUDE.md), Read(.claude/skills/job-application-assistant/08-search-fit-filter.md)
+allowed-tools: Bash(scripts/bun_guarded.py .claude/skills/jobfinder-lu-search/cli/src/cli.ts *), Read(CLAUDE.md), Read(.claude/skills/job-application-assistant/08-search-fit-filter.md)
+disallowed-tools: WebSearch WebFetch Agent
 ---
 
 # Jobfinder.lu Search Skill
+
+## If the CLI command fails
+
+If the `bun run` command above returns a non-zero exit code, an `{"error": ...}` JSON
+payload, or gets denied by a permission prompt: **stop and report the exact error to
+the user verbatim**. Do not substitute results from WebSearch, WebFetch, the Indeed
+MCP tools, or any other source — a silent fallback mixes data sources and misleads
+the user about where results came from.
 
 Access live Luxembourg job listings from the Jobfinder.lu public API (`api.jobfinder.lu`),
 the documented FastAPI backend behind the jobfinder.lu job board. No authentication needed.
@@ -47,7 +56,7 @@ Invoke this skill when the user wants to:
 ### Search job listings
 
 ```bash
-bun run skills/jobfinder-lu-search/cli/src/cli.ts search [flags]
+scripts/bun_guarded.py .claude/skills/jobfinder-lu-search/cli/src/cli.ts search [flags]
 ```
 
 Key flags:
@@ -62,7 +71,7 @@ Key flags:
 ### Full job detail
 
 ```bash
-bun run skills/jobfinder-lu-search/cli/src/cli.ts detail <id> [--format json|plain]
+scripts/bun_guarded.py .claude/skills/jobfinder-lu-search/cli/src/cli.ts detail <id> [--format json|plain]
 ```
 
 `id` is the offer ID returned as `id` in `search` results. Returns title, full HTML description, hours/week, contract/category/experience/education tags, how to apply, and company address.
@@ -70,7 +79,7 @@ bun run skills/jobfinder-lu-search/cli/src/cli.ts detail <id> [--format json|pla
 ### Filter taxonomy
 
 ```bash
-bun run skills/jobfinder-lu-search/cli/src/cli.ts filters [--group <name>] [--format json|table|plain]
+scripts/bun_guarded.py .claude/skills/jobfinder-lu-search/cli/src/cli.ts filters [--group <name>] [--format json|table|plain]
 ```
 
 Lists filter IDs and English labels across 5 groups: **Contract**, **Working time**, **Categories** (sector), **Experience**, **Educational level**. Use `--group categories` etc. to narrow.
@@ -94,7 +103,7 @@ Lists filter IDs and English labels across 5 groups: **Contract**, **Working tim
 **Resolve filter IDs first.** Use `filters --group <name>` to find the ID(s) for what the user wants before passing them to `search`:
 
 ```bash
-bun run skills/jobfinder-lu-search/cli/src/cli.ts filters --group categories --format plain
+scripts/bun_guarded.py .claude/skills/jobfinder-lu-search/cli/src/cli.ts filters --group categories --format plain
 ```
 
 **Natural workflow: `search` → `detail`.**
@@ -112,10 +121,10 @@ bun run skills/jobfinder-lu-search/cli/src/cli.ts filters --group categories --f
 ### IT jobs, permanent contract
 
 ```bash
-bun run skills/jobfinder-lu-search/cli/src/cli.ts filters --group categories --format plain | grep -i " IT$"
-bun run skills/jobfinder-lu-search/cli/src/cli.ts filters --group contract --format plain
+scripts/bun_guarded.py .claude/skills/jobfinder-lu-search/cli/src/cli.ts filters --group categories --format plain | grep -i " IT$"
+scripts/bun_guarded.py .claude/skills/jobfinder-lu-search/cli/src/cli.ts filters --group contract --format plain
 # then:
-bun run skills/jobfinder-lu-search/cli/src/cli.ts search \
+scripts/bun_guarded.py .claude/skills/jobfinder-lu-search/cli/src/cli.ts search \
   --filter 63e0110df1bf6ae542db6973 \
   --filter 63e0b58029de75e381ec85e1 \
   --sort date --format table
@@ -124,19 +133,19 @@ bun run skills/jobfinder-lu-search/cli/src/cli.ts search \
 ### Python jobs, most recent first
 
 ```bash
-bun run skills/jobfinder-lu-search/cli/src/cli.ts search --query "python" --sort date --format table
+scripts/bun_guarded.py .claude/skills/jobfinder-lu-search/cli/src/cli.ts search --query "python" --sort date --format table
 ```
 
 ### Full details for a specific job posting
 
 ```bash
-bun run skills/jobfinder-lu-search/cli/src/cli.ts detail 69d5098ee989f572eb8047eb --format plain
+scripts/bun_guarded.py .claude/skills/jobfinder-lu-search/cli/src/cli.ts detail 69d5098ee989f572eb8047eb --format plain
 ```
 
 ### Senior-level jobs (5+ years experience), full-time
 
 ```bash
-bun run skills/jobfinder-lu-search/cli/src/cli.ts search \
+scripts/bun_guarded.py .claude/skills/jobfinder-lu-search/cli/src/cli.ts search \
   --filter 63e0b4960fcdc9a958f58086 \
   --filter 63e0b58029de75e381ec85e6 \
   --sort date --format table

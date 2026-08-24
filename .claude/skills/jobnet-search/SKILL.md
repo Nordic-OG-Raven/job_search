@@ -18,10 +18,19 @@ description: >
   social worker job denmark, occupation search denmark, esco occupation, job deadline,
   ansøgningsfrist, søg efter job, full time job denmark, part time job denmark.
 context: fork
-allowed-tools: Bash(bun run skills/jobnet-search/cli/src/cli.ts *), Read(CLAUDE.md), Read(.claude/skills/job-application-assistant/08-search-fit-filter.md)
+allowed-tools: Bash(scripts/bun_guarded.py .claude/skills/jobnet-search/cli/src/cli.ts *), Read(CLAUDE.md), Read(.claude/skills/job-application-assistant/08-search-fit-filter.md)
+disallowed-tools: WebSearch WebFetch Agent
 ---
 
 # Jobnet-Search Skill
+
+## If the CLI command fails
+
+If the `bun run` command above returns a non-zero exit code, an `{"error": ...}` JSON
+payload, or gets denied by a permission prompt: **stop and report the exact error to
+the user verbatim**. Do not substitute results from WebSearch, WebFetch, the Indeed
+MCP tools, or any other source — a silent fallback mixes data sources and misleads
+the user about where results came from.
 
 ## Before presenting results: candidate fit filter
 
@@ -53,7 +62,7 @@ Invoke this skill when the user wants to:
 ### Search for job ads
 
 ```bash
-bun run skills/jobnet-search/cli/src/cli.ts search [flags]
+scripts/bun_guarded.py .claude/skills/jobnet-search/cli/src/cli.ts search [flags]
 ```
 
 Key flags:
@@ -73,7 +82,7 @@ Key flags:
 ### Full job ad detail
 
 ```bash
-bun run skills/jobnet-search/cli/src/cli.ts detail <jobAdId> [--format json|plain]
+scripts/bun_guarded.py .claude/skills/jobnet-search/cli/src/cli.ts detail <jobAdId> [--format json|plain]
 ```
 
 `jobAdId` is the UUID from `search` results (the `jobAdId` field). Returns the complete job
@@ -82,7 +91,7 @@ description, contact persons, application deadline, employer details, and direct
 ### Search occupation types
 
 ```bash
-bun run skills/jobnet-search/cli/src/cli.ts occupations --search-string <text> [--per-page <n>]
+scripts/bun_guarded.py .claude/skills/jobnet-search/cli/src/cli.ts occupations --search-string <text> [--per-page <n>]
 ```
 
 Use this to discover ESCO occupation identifiers before passing them to `search` with
@@ -91,7 +100,7 @@ Use this to discover ESCO occupation identifiers before passing them to `search`
 ### Typeahead suggestions
 
 ```bash
-bun run skills/jobnet-search/cli/src/cli.ts suggestions --query <text> [--limit <n>]
+scripts/bun_guarded.py .claude/skills/jobnet-search/cli/src/cli.ts suggestions --query <text> [--limit <n>]
 ```
 
 Returns Danish job title autocomplete strings. Useful for exploring valid Danish
@@ -105,8 +114,8 @@ job titles before constructing a `search` query.
 term or ESCO identifier before running a `search`:
 
 ```bash
-bun run skills/jobnet-search/cli/src/cli.ts suggestions --query "syge"
-bun run skills/jobnet-search/cli/src/cli.ts occupations --search-string "sygeplejerske"
+scripts/bun_guarded.py .claude/skills/jobnet-search/cli/src/cli.ts suggestions --query "syge"
+scripts/bun_guarded.py .claude/skills/jobnet-search/cli/src/cli.ts occupations --search-string "sygeplejerske"
 ```
 
 **Natural workflow: `search` → `detail`.**
@@ -136,7 +145,7 @@ CLI outputs. Use `--page` + `--per-page` to iterate through large result sets.
 ### Jobs in Copenhagen area
 
 ```bash
-bun run skills/jobnet-search/cli/src/cli.ts search \
+scripts/bun_guarded.py .claude/skills/jobnet-search/cli/src/cli.ts search \
   --region HovedstadenOgBornholm \
   --per-page 10 \
   --format table
@@ -145,7 +154,7 @@ bun run skills/jobnet-search/cli/src/cli.ts search \
 ### Nurse jobs nationwide
 
 ```bash
-bun run skills/jobnet-search/cli/src/cli.ts search \
+scripts/bun_guarded.py .claude/skills/jobnet-search/cli/src/cli.ts search \
   --search-string "sygeplejerske" \
   --work-hours FullTime \
   --duration Permanent \
@@ -157,7 +166,7 @@ bun run skills/jobnet-search/cli/src/cli.ts search \
 ### IT jobs near Aarhus within 30km
 
 ```bash
-bun run skills/jobnet-search/cli/src/cli.ts search \
+scripts/bun_guarded.py .claude/skills/jobnet-search/cli/src/cli.ts search \
   --search-string "udvikler" \
   --postal-code 8000 \
   --radius 30 \
@@ -168,13 +177,13 @@ bun run skills/jobnet-search/cli/src/cli.ts search \
 ### Full details of a job ad
 
 ```bash
-bun run skills/jobnet-search/cli/src/cli.ts detail 9ef43bce-d82b-4ea1-a098-7ff6520f99be --format plain
+scripts/bun_guarded.py .claude/skills/jobnet-search/cli/src/cli.ts detail 9ef43bce-d82b-4ea1-a098-7ff6520f99be --format plain
 ```
 
 ### Jobs sorted by application deadline (urgent first)
 
 ```bash
-bun run skills/jobnet-search/cli/src/cli.ts search \
+scripts/bun_guarded.py .claude/skills/jobnet-search/cli/src/cli.ts search \
   --search-string "pædagog" \
   --region OevrigeSjaelland \
   --order ApplicationDate \
@@ -184,8 +193,8 @@ bun run skills/jobnet-search/cli/src/cli.ts search \
 ### Discover occupation terms
 
 ```bash
-bun run skills/jobnet-search/cli/src/cli.ts suggestions --query "ingeniør" --limit 5
-bun run skills/jobnet-search/cli/src/cli.ts occupations --search-string "lærer" --per-page 5
+scripts/bun_guarded.py .claude/skills/jobnet-search/cli/src/cli.ts suggestions --query "ingeniør" --limit 5
+scripts/bun_guarded.py .claude/skills/jobnet-search/cli/src/cli.ts occupations --search-string "lærer" --per-page 5
 ```
 
 ---

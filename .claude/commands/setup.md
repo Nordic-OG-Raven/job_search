@@ -10,7 +10,7 @@ There are three paths into setup. Step 0 picks the right one; all three converge
 
 If `$ARGUMENTS` contains `--section <name>`, skip directly to that section in Path C for an update-only flow. Do not run the path-selection prompt below.
 
-Otherwise, before greeting the user, scan the `documents/` folder. Use Glob with `documents/**/*` and count files per subfolder (`cv/`, `linkedin/`, `diplomas/`, `references/`, `applications/`).
+Otherwise, before greeting the user, scan the `documents/` folder. Use **separate** Glob calls for `documents/linkedin/*`, `documents/diplomas/*`, `documents/references/*`, and `documents/applications/**/*`, and count files in each. Do not use a single `documents/**/*` glob — `documents/all_cvs/` can contain hundreds of files and is `/build-master-cv`'s domain, not `/setup`'s; including it in the same glob makes the counts for the folders above unreliable.
 
 Then welcome the user with a single message that lists three paths. The wording changes based on what was found.
 
@@ -20,7 +20,7 @@ Then welcome the user with a single message that lists three paths. The wording 
 >
 > I'll help you build your professional profile so Claude can evaluate job postings, tailor CVs, write cover letters, and prepare you for interviews.
 >
-> I see files in your `documents/` folder: [list per subfolder, e.g. "2 in cv/, 1 in linkedin/, 3 in references/"]. Three ways to start:
+> I see files in your `documents/` folder: [list per subfolder, e.g. "2 in diplomas/, 1 in linkedin/, 3 in references/"]. Three ways to start:
 >
 > **Path A: Read my documents folder** (recommended for what you have) - I'll read everything in `documents/`, cross-reference for consistency, and build your profile from real source materials. Idempotent and safe to re-run as you add more documents.
 >
@@ -58,12 +58,11 @@ Follow these steps **exactly in order**.
 
 ### Step A1: Inventory
 
-Use Glob with `documents/**/*` to scan the full tree. Print:
+Use **separate** Glob calls for `documents/linkedin/*`, `documents/diplomas/*`, `documents/references/*`, and `documents/applications/**/*` (do not use a single `documents/**/*` glob — see Step 0). Print:
 
 ```
 ## Documents Found
 
-**cv/**: [list files, or "(empty)"]
 **linkedin/**: [list files, or "(empty)"]
 **diplomas/**: [list files, or "(empty)"]
 **references/**: [list files, or "(empty)"]
@@ -90,9 +89,7 @@ Hold this content in context throughout Path A. Do not re-read.
 
 ### Step A3: Parse Documents
 
-Read each document found in Step A1. Process subfolders in this order: `cv/`, `linkedin/`, `diplomas/`, `references/`, `applications/`.
-
-**`cv/` documents:** name, contact (email, phone, LinkedIn, GitHub), education (degree, institution, dates, thesis), work experience (title, company, dates, location, bullets), skills, publications, awards, profile/summary.
+Read each document found in Step A1. Process subfolders in this order: `linkedin/`, `diplomas/`, `references/`, `applications/`.
 
 **`linkedin/` documents:** About/summary section (full text, used for behavioral inference), work experience, education, skills and endorsements, certifications, volunteer work, publications, recommendations received (full text). If multiple LinkedIn exports are present, use the most recently modified file.
 
@@ -144,6 +141,7 @@ For each skill file, compare extracted document content against the current file
 
 **Inference rules** (apply when populating from inferred sources):
 
+- **`01-candidate-profile.md` (Technical Skills additions):** New skill items (e.g. LinkedIn endorsements, certifications) must be placed under the appropriate proficiency tier — **Proficient**, **Working Knowledge**, or **Familiar / Exposure** (see the tier definitions at the top of the Technical Skills section). Default LinkedIn-endorsement-only skills to **Familiar / Exposure** unless corroborated by a role, project, or course elsewhere in the profile. Show the proposed tier alongside each new skill in Step A6 so the user can confirm or adjust it before writing.
 - **`02-behavioral-profile.md`:** Source is LinkedIn About + recommendation letters. Extract recurring themes, adjectives, phrases about how the candidate works. Add only to "Strongest Behavioral Traits", "How [Candidate] Works Best", or "Management Style Preferences" sections. Do not overwrite existing scored assessments. Always label inferred additions: *[Inferred from LinkedIn About / Reference letter - review before relying on this]*
 - **`03-writing-style.md`:** Source is `cover_letter.tex` files. Extract recurring patterns. Add as observations under "## Patterns Observed in Past Applications". Do not modify existing rules. Only add if 2+ cover letters show a genuine pattern.
 - **`04-job-evaluation.md`:** Source is `job_posting.md` + `outcome.md` pairs. If an application reached interview or offer: note role type and sector as a confirmed strong-fit signal. If 2+ applications repeat a no-response or rejection pattern: note it. Add findings under "## Calibration from Past Applications". Do not modify the existing scoring framework.
@@ -222,7 +220,7 @@ Documents cover skills, experience, education, references, and behavioral signal
 - Commute or location constraints (if not visible from CV)
 - Job search configuration (use the questions from Path C Section 9 below)
 
-Then proceed to Step 3 to populate the non-skill files (`CLAUDE.md`, `cv/main_example.tex`, `.claude/skills/job-scraper/search-queries.md`). Step 3 will detect that the seven skill files are already populated and skip those substeps.
+Then proceed to Step 3 to populate the non-skill files (`CLAUDE.md`, `cv/main_master.tex`, `.claude/skills/job-scraper/search-queries.md`). Step 3 will detect that the seven skill files are already populated and skip those substeps.
 
 ---
 
@@ -351,8 +349,15 @@ Add role-specific profile statement templates based on their background.
 ### 6. Update `07-interview-prep.md` *(Path B and C; skip if Path A populated it)*
 Create STAR examples from their actual experience (at least 3-4 examples). Path A leaves STAR stubs under "## STAR Candidates (Complete Manually)" rather than full examples; if any stubs are present, mention them in Step 4 so the user knows to flesh them out.
 
-### 7. Update `cv/main_example.tex`
+### 7. Update `cv/main_master.tex`
 Replace placeholder personal data with their actual name, contact info, and add their education and most recent experience entries.
+
+**Skip this step if `/build-master-cv` has already run** (check for
+`.claude/skills/job-application-assistant/00-merge-changelog.md` with at least one batch
+entry, or a "Regenerated by /build-master-cv" comment at the top of
+`cv/main_master.tex`). In that case the file is already a full regeneration from the
+skill files — a partial edit here would duplicate or clobber content. Just mention in
+Step 4 that `cv/main_master.tex` is already up to date.
 
 ### 8. Generate `.claude/skills/job-scraper/search-queries.md`
 Replace all placeholder tokens in the search queries file with the user's actual information from Section 9 (or the equivalent follow-up questions in Path A's Step A7):
@@ -380,7 +385,7 @@ Present a summary:
 > - `.claude/skills/job-application-assistant/04-job-evaluation.md` - Personalized evaluation framework
 > - `.claude/skills/job-application-assistant/05-cv-templates.md` - CV templates with your profile statements
 > - `.claude/skills/job-application-assistant/07-interview-prep.md` - STAR examples from your experience
-> - `cv/main_example.tex` - Your LaTeX CV template
+> - `cv/main_master.tex` - Your LaTeX CV template
 > - `.claude/skills/job-scraper/search-queries.md` - Job search queries for `/scrape`
 >
 > **Try it out:**

@@ -8,7 +8,7 @@ This folder holds your actual career documents. The `/setup` command reads every
 
 ```
 documents/
-├── cv/                          # Your CV files (PDF or LaTeX)
+├── all_cvs/                     # Archive of historical CVs for /build-master-cv
 ├── linkedin/                    # LinkedIn profile export (PDF)
 ├── diplomas/                    # Degree certificates and transcripts
 ├── references/                  # Reference letters
@@ -23,22 +23,39 @@ documents/
 
 ---
 
-## cv/
+## all_cvs/
 
-Your master CV — the most complete, unedited version of your professional record.
+An archive of every old CV you've ever written, for `/build-master-cv` to mine for content
+(work history, projects, skills, and profile-statement framing) that may be missing from
+your current profile.
 
-**Supported formats:** `.pdf`, `.tex`
+**Where the master CV actually lives:** `/build-master-cv` writes the mined content into
+the candidate skill files, then regenerates `cv/main_master.tex` (and compiles
+`cv/main_master.pdf`) as the single comprehensive, human-readable master CV — that's the
+"one reference point" document, not anything under `documents/`.
 
-**What `/setup` extracts:**
-- Work experience (titles, companies, dates, bullet points)
-- Education (degrees, institutions, dates, thesis topics)
-- Technical skills
-- Awards and publications
-- Contact information
+**Supported formats:** `.pdf`, `.docx`
 
-**Naming:** Any filename works. If multiple files are present, `/setup` reads all of them and cross-references for consistency.
+**Structure:** Organize into roughly-chronological subfolders (e.g. `2023-24/`, `2025-26/`)
+— exact dates aren't required, just rough ordering. `/build-master-cv` processes folders
+in ascending name order, in small groups, and is safe to re-run repeatedly until everything
+is processed.
 
-**Tip:** Keep your most comprehensive CV here (not a tailored variant). The skill files are the canonical source — tailored CVs are generated per application by `/apply`.
+**What `/build-master-cv` does:**
+- Cross-references each old CV against the current candidate profile
+- Adds genuinely new work history, projects, skills, and achievements as a superset
+  (never deletes)
+- Flags conflicting facts (e.g. mismatched dates) for you to resolve rather than guessing
+- Adds new profile-statement / "what I'm passionate about" variants to
+  `05-cv-templates.md`, tagged with their source file
+- Moves processed files into a `_processed/` subfolder within each year-folder so re-runs
+  pick up where they left off
+- Writes a running changelog to `.claude/skills/job-application-assistant/00-merge-changelog.md`,
+  including a final "possibly outdated" review once everything is processed
+
+**Scope note:** not every file here is a CV — some are cover letters or other
+documents. `/build-master-cv` reads each file and classifies it by content; non-CV
+files are logged as "no new content" and archived without affecting your profile.
 
 ---
 
@@ -172,4 +189,6 @@ The command is designed to be re-run as your document collection grows. Each run
 - After adding a new LinkedIn export
 - After adding reference letters
 - After recording outcomes for completed applications
-- After updating your master CV
+
+To update your master CV, add new source documents to `all_cvs/` and run
+`/build-master-cv` instead — `/setup` no longer reads a dedicated master-CV folder.

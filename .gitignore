@@ -57,10 +57,35 @@ documents/linkedin/**
 documents/diplomas/**
 documents/references/**
 documents/applications/**
+documents/all_cvs/**
 !documents/**/.gitkeep
 
 # Personal job search tracking
 job_search_tracker.csv
+job_postings/
 
 # Upskill reports (personal output)
 upskill/*.md
+
+# Career ROI reports (personal output)
+career-roi/*.md
+
+# Claude Code local machine/session state (paths, permission history — never share)
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+
+# Personal automation outputs (generated, never commit)
+scripts/daily_digests/
+scripts/seen_jobs.db
+scripts/run_state.json
+scripts/run_state.json.tmp
+scripts/.bun_slots/
+scripts/.morning_scan.lock
+logs/
+
+# Personal candidate profile used by morning_scan.py's fit-evaluation prompt —
+# see scripts/candidate_profile.example.txt for the template to copy from.
+scripts/candidate_profile.txt
+
+# Candidate-profile merge log (contains PII by design — generated during /setup, /expand)
+.claude/skills/job-application-assistant/00-merge-changelog.md

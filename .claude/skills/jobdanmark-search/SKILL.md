@@ -17,10 +17,19 @@ description: >
   work in denmark, employment denmark, job denmark, jobs near me denmark,
   apprentice denmark, internship denmark, part-time denmark, full-time denmark.
 context: fork
-allowed-tools: Bash(bun run skills/jobdanmark-search/cli/src/cli.ts *), Read(CLAUDE.md), Read(.claude/skills/job-application-assistant/08-search-fit-filter.md)
+allowed-tools: Bash(scripts/bun_guarded.py .claude/skills/jobdanmark-search/cli/src/cli.ts *), Read(CLAUDE.md), Read(.claude/skills/job-application-assistant/08-search-fit-filter.md)
+disallowed-tools: WebSearch WebFetch Agent
 ---
 
 # Jobdanmark Search Skill
+
+## If the CLI command fails
+
+If the `bun run` command above returns a non-zero exit code, an `{"error": ...}` JSON
+payload, or gets denied by a permission prompt: **stop and report the exact error to
+the user verbatim**. Do not substitute results from WebSearch, WebFetch, the Indeed
+MCP tools, or any other source — a silent fallback mixes data sources and misleads
+the user about where results came from.
 
 ## Before presenting results: candidate fit filter
 
@@ -50,7 +59,7 @@ Invoke this skill when the user wants to:
 ### Search job listings
 
 ```bash
-bun run skills/jobdanmark-search/cli/src/cli.ts search [flags]
+scripts/bun_guarded.py .claude/skills/jobdanmark-search/cli/src/cli.ts search [flags]
 ```
 
 Key flags:
@@ -70,7 +79,7 @@ Key flags:
 ### Full job detail
 
 ```bash
-bun run skills/jobdanmark-search/cli/src/cli.ts detail <slug> [--format json|plain]
+scripts/bun_guarded.py .claude/skills/jobdanmark-search/cli/src/cli.ts detail <slug> [--format json|plain]
 ```
 
 `slug` is the URL path segment returned as `slug` in `search` results (e.g. `it-chef-soeges-til-rah`).
@@ -79,7 +88,7 @@ Returns full structured job data from the job page's JSON-LD, including title, o
 ### List categories with live counts
 
 ```bash
-bun run skills/jobdanmark-search/cli/src/cli.ts categories [--format json|table|plain]
+scripts/bun_guarded.py .claude/skills/jobdanmark-search/cli/src/cli.ts categories [--format json|table|plain]
 ```
 
 Returns all 10 job categories with current live job counts. Useful for giving the user an overview of the job market.
@@ -87,7 +96,7 @@ Returns all 10 job categories with current live job counts. Useful for giving th
 ### Autocomplete job titles and categories
 
 ```bash
-bun run skills/jobdanmark-search/cli/src/cli.ts autocomplete --query "<text>" [--limit <n>]
+scripts/bun_guarded.py .claude/skills/jobdanmark-search/cli/src/cli.ts autocomplete --query "<text>" [--limit <n>]
 ```
 
 Use this to resolve search terms into precise job title IDs (`--jobtitle-id`) or category IDs (`--category`) for `search`. The `value` field in results is the ID to pass to `search`.
@@ -95,7 +104,7 @@ Use this to resolve search terms into precise job title IDs (`--jobtitle-id`) or
 ### Suggest locations
 
 ```bash
-bun run skills/jobdanmark-search/cli/src/cli.ts locations --query "<text>" [--limit <n>]
+scripts/bun_guarded.py .claude/skills/jobdanmark-search/cli/src/cli.ts locations --query "<text>" [--limit <n>]
 ```
 
 Returns matching municipalities, zip codes, and regions. Use `value` from results as `--municipality` or `--zip` in `search`.
@@ -124,13 +133,13 @@ Returns matching municipalities, zip codes, and regions. Use `value` from result
 **Resolve locations first.** Use `locations` to find the correct municipality name or zip code before passing them to `search`:
 
 ```bash
-bun run skills/jobdanmark-search/cli/src/cli.ts locations --query "Aarhus" --format plain
+scripts/bun_guarded.py .claude/skills/jobdanmark-search/cli/src/cli.ts locations --query "Aarhus" --format plain
 ```
 
 **Resolve job titles for precision.** Use `autocomplete` to get the exact job title ID when the user wants a specific role:
 
 ```bash
-bun run skills/jobdanmark-search/cli/src/cli.ts autocomplete --query "sygeplejerske" --format plain
+scripts/bun_guarded.py .claude/skills/jobdanmark-search/cli/src/cli.ts autocomplete --query "sygeplejerske" --format plain
 ```
 
 **Natural workflow: `search` → `detail`.**
@@ -150,7 +159,7 @@ bun run skills/jobdanmark-search/cli/src/cli.ts autocomplete --query "sygeplejer
 ### IT jobs in Copenhagen
 
 ```bash
-bun run skills/jobdanmark-search/cli/src/cli.ts search \
+scripts/bun_guarded.py .claude/skills/jobdanmark-search/cli/src/cli.ts search \
   --category 227978 \
   --municipality "København" \
   --job-type fuldtid \
@@ -160,7 +169,7 @@ bun run skills/jobdanmark-search/cli/src/cli.ts search \
 ### Nursing jobs anywhere in Denmark
 
 ```bash
-bun run skills/jobdanmark-search/cli/src/cli.ts search \
+scripts/bun_guarded.py .claude/skills/jobdanmark-search/cli/src/cli.ts search \
   --text "sygeplejerske" \
   --category 227975 \
   --format table
@@ -169,7 +178,7 @@ bun run skills/jobdanmark-search/cli/src/cli.ts search \
 ### Student jobs in Aarhus
 
 ```bash
-bun run skills/jobdanmark-search/cli/src/cli.ts search \
+scripts/bun_guarded.py .claude/skills/jobdanmark-search/cli/src/cli.ts search \
   --municipality "Aarhus" \
   --job-type studiejob \
   --format table
@@ -178,25 +187,25 @@ bun run skills/jobdanmark-search/cli/src/cli.ts search \
 ### What job categories are most active right now?
 
 ```bash
-bun run skills/jobdanmark-search/cli/src/cli.ts categories --format table
+scripts/bun_guarded.py .claude/skills/jobdanmark-search/cli/src/cli.ts categories --format table
 ```
 
 ### Full details for a specific job posting
 
 ```bash
-bun run skills/jobdanmark-search/cli/src/cli.ts detail it-chef-soeges-til-rah --format plain
+scripts/bun_guarded.py .claude/skills/jobdanmark-search/cli/src/cli.ts detail it-chef-soeges-til-rah --format plain
 ```
 
 ### Find jobs in zip code 8000
 
 ```bash
-bun run skills/jobdanmark-search/cli/src/cli.ts search --zip 8000 --format table
+scripts/bun_guarded.py .claude/skills/jobdanmark-search/cli/src/cli.ts search --zip 8000 --format table
 ```
 
 ### What electrician jobs are available?
 
 ```bash
-bun run skills/jobdanmark-search/cli/src/cli.ts search \
+scripts/bun_guarded.py .claude/skills/jobdanmark-search/cli/src/cli.ts search \
   --text "elektriker" \
   --category 227973 \
   --job-type "fuldtid,deltid" \
@@ -206,7 +215,7 @@ bun run skills/jobdanmark-search/cli/src/cli.ts search \
 ### Apprentice positions in all of Denmark
 
 ```bash
-bun run skills/jobdanmark-search/cli/src/cli.ts search \
+scripts/bun_guarded.py .claude/skills/jobdanmark-search/cli/src/cli.ts search \
   --job-type elev \
   --page 1 \
   --format table

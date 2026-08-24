@@ -1,10 +1,10 @@
-# Upskill
-
-**name:** upskill
-**description:** Compares tracked job postings against the candidate profile to identify skill gaps and generate a prioritized learning plan with study resources. Triggers on: /upskill, upskill, skill gaps, what should I learn, learning plan
-**allowed-tools:** Read, Write, Glob, Grep, WebFetch, WebSearch
-
 ---
+name: upskill
+description: Compares tracked job postings against the candidate profile to identify skill gaps and generate a prioritized learning plan with study resources. Triggers on: /upskill, upskill, skill gaps, what should I learn, learning plan
+allowed-tools: Read, Write, Glob, Grep, WebFetch, WebSearch
+---
+
+# Upskill
 
 ## Overview
 
@@ -31,7 +31,7 @@ In targeted mode, derive a slug from the job title and company for the report fi
 ### Aggregate mode
 1. Read `job_search_tracker.csv`. Extract all rows. The columns are:
    `date, company, sector, role, role_type, channel, status, contact_person, fit_rating, notes, cv_file, cover_letter_file, source`
-2. For each row, note the `role`, `company`, and `fit_rating`. The `fit_rating` column is a 0–100 score where 100 = perfect fit. You will use it to weight gaps — a lower fit rating means the role exposed more gaps.
+2. For each row, note the `role`, `company`, and `fit_rating`. `fit_rating` is free text, not a number (real values include things like "Strong fit", "Good fit", "Strong fit (skills) / French gap", "Poor fit (bait-and-switch)", and occasionally a full explanatory sentence). Classify each by keyword, case-insensitive, checking in this order: contains "poor" or "bait-and-switch" → **poor**; contains "strong" → **strong**; contains "good" → **good**; anything else (including the free-text sentence rows) → **unclear**. You will use this classification to weight gaps — a weaker fit means the role exposed more gaps.
 3. Read `.claude/skills/job-application-assistant/01-candidate-profile.md` to get the candidate's current skills and experience.
 4. Check `upskill/` for the most recent aggregate report file (`report-YYYY-MM-DD.md`) — if one exists, note its date and load it for the diff in Step 8.
 
@@ -48,7 +48,7 @@ Extract required and preferred technical skills from each job source:
 ### Aggregate mode
 For each job row in the tracker, you do not have the full posting — use the `role`, `sector`, and `notes` columns to infer likely required skills. If the row has a `source` URL, you may optionally WebFetch it for more detail, but skip if the URL is missing or dead.
 
-Build a **skill frequency map**: for each extracted skill, count how many jobs mention it. Then apply a **fit weight**: for each job, multiply the skill count contribution by `(100 - fit_rating) / 100` — lower fit jobs contribute more to the gap score.
+Build a **skill frequency map**: for each extracted skill, count how many jobs mention it. Then apply a **fit weight** based on the Step 2 classification: **strong** → 0.2, **good** → 0.5, **poor** or **unclear** → 1.0 — a role you were a strong fit for already matched most requirements, so it should barely move the gap score; a poor-fit or ambiguous row likely exposed a real gap, so it counts fully.
 
 Final score for each skill: `sum of (fit_weight × occurrence)` across all jobs.
 

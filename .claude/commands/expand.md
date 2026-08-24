@@ -21,8 +21,8 @@ Hold this content in context throughout the command. Do not re-read these files 
 
 Scan every available source for "experience items" — anything that implies skill, knowledge, or competency. Process sources in this order.
 
-### 1a. documents/cv/
-Read all files in `documents/cv/`. Extract:
+### 1a. cv/main_master.tex
+Read `cv/main_master.tex` (the master CV). Extract:
 - Every course or module listed (including university coursework and online courses)
 - Every certification mentioned, with issuer and date
 - Every job responsibility bullet point (tools, methods, outcomes)
@@ -172,6 +172,14 @@ Apply only the confirmed items. Use the Edit tool to add to the relevant section
 - Technical skills (primary and secondary) → append to the Technical Skills section
 - Domain knowledge → append to the Domain Knowledge or Technical Skills section (match the existing structure)
 - Methods and practices → append appropriately
+- Real projects (GitHub repos, competitions, freelance/consulting work, shipped tools) → append to
+  "Portfolio Projects" as a new `### Name` entry using the fixed schema documented at the top of that
+  section (Stack, Type, Status, Dates, Links, Summary, Impact, Best fit for). Fill every field — use
+  "—" for anything not found rather than omitting the field or fabricating a value (e.g. don't invent
+  a GitHub link if none was found).
+- Hobbies, sports, or volunteer work → append to "Personal Interests & Volunteering" instead — never
+  file these as Portfolio Projects, since `/build-master-cv` renders Portfolio Projects directly into
+  the CV's "Projects" section.
 
 For each addition, add a brief source annotation in a comment or parenthetical: *(Coursera — Deep Learning Specialisation)*, *(GitHub — project-name)*, etc. This makes future `/expand` runs idempotent.
 
