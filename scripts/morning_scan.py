@@ -34,10 +34,11 @@ STATE_PATH = SCRIPTS / "run_state.json"
 LOCK_PATH  = SCRIPTS / ".morning_scan.lock"
 CANDIDATE_PROFILE_PATH = SCRIPTS / "candidate_profile.txt"
 
-# shutil.which() first so this works out of the box on any machine where these
-# are on PATH; falls back to this machine's known install location only if not.
+# shutil.which() first so this works out of the box on any machine where it's
+# on PATH; falls back to this machine's known install location only if not.
 CLAUDE_BIN = shutil.which("claude") or "/opt/homebrew/bin/claude"
-BUN_BIN    = shutil.which("bun") or "/Users/jonas/.bun/bin/bun"
+# All bun invocations go through BUN_GUARD (bun_guarded.py), which resolves
+# its own bun path — there's no direct bun call in this file.
 BUN_GUARD  = str(SCRIPTS / "bun_guarded.py")  # concurrency-capped, --smol wrapper — see that file
 
 # Flush stdout/stderr line-by-line unconditionally — even when piped (not a
@@ -283,6 +284,7 @@ PORTALS = [
         "detail": lambda jid: ["detail", jid, "--format", "plain"],
     },
 ]
+_DISABLED_PORTAL_NAMES = {cfg["name"] for cfg in PORTALS if not cfg.get("enabled", True)}
 PORTALS = [cfg for cfg in PORTALS if cfg.get("enabled", True)]
 
 # --portal <name>: restrict this run to one or more specific portals
@@ -294,7 +296,16 @@ if _portal_filter_raw:
     _portal_filter = {p.strip() for p in _portal_filter_raw.split(",") if p.strip()}
     _unknown = _portal_filter - {cfg["name"] for cfg in PORTALS}
     if _unknown:
-        print(f"[ERROR] unknown --portal value(s): {', '.join(sorted(_unknown))}", file=sys.stderr)
+        # Distinguish "not a real portal name" from "real but disabled" —
+        # checking only the post-filter PORTALS here would misreport a
+        # disabled-but-valid name (e.g. workforce-au) as a typo.
+        _disabled_hit = _unknown & _DISABLED_PORTAL_NAMES
+        _truly_unknown = _unknown - _DISABLED_PORTAL_NAMES
+        if _truly_unknown:
+            print(f"[ERROR] unknown --portal value(s): {', '.join(sorted(_truly_unknown))}", file=sys.stderr)
+        if _disabled_hit:
+            print(f"[ERROR] disabled --portal value(s): {', '.join(sorted(_disabled_hit))} "
+                  f"(configured but currently disabled — see \"enabled\": False in PORTALS)", file=sys.stderr)
         print(f"        valid portals: {', '.join(cfg['name'] for cfg in PORTALS)}", file=sys.stderr)
         sys.exit(1)
     PORTALS = [cfg for cfg in PORTALS if cfg["name"] in _portal_filter]
@@ -348,7 +359,7 @@ nothing else:
 RATING: <Strong Fit|Good Fit|Borderline|No Fit>
 REASON: <one sentence, max 20 words>
 
-""" + CANDIDATE_PROFILE + """
+{candidate_profile}
 
 {jobs}
 """
@@ -410,6 +421,23 @@ def update_fit(conn: sqlite3.Connection, portal: str, job_id: str,
     conn.commit()
 
 
+# workforce-au's own CLI passes through a literal placeholder string when it
+# can't resolve the real employer — confirmed on real fetched postings, every
+# one printed "Employer: CareerOne ORG" or "Employer: Adzuna ORG" verbatim.
+# These are NOT company names; matching on them produces real false positives
+# (confirmed on the live DB: "Data Engineer" @ "Adzuna ORG" alone covers 9
+# genuinely different postings). Excluded outright from duplicate-matching.
+#
+# Known residual risk, not fixed here: a real staffing agency that legitimately
+# reposts many distinct client roles under its own company name (e.g. jobs-ch's
+# "Evergreen Human Resources AG") looks structurally identical to a genuine
+# repost and isn't caught by this exclusion — title+company alone can't tell
+# the two apart without also comparing description text, which this function
+# doesn't have access to. Rare enough in practice not to block on right now,
+# but worth knowing if a wrong-looking copied rating shows up from that portal.
+_DUPLICATE_MATCH_EXCLUDED_COMPANIES = {"Adzuna ORG", "CareerOne ORG"}
+
+
 def find_existing_rating(conn: sqlite3.Connection, title: str, company: str,
                           exclude_portal: str, exclude_job_id: str) -> tuple[str, str] | None:
     """
@@ -421,6 +449,8 @@ def find_existing_rating(conn: sqlite3.Connection, title: str, company: str,
     something already decided. Returns (rating, notes) to copy, or None if
     this is genuinely unseen.
     """
+    if company in _DUPLICATE_MATCH_EXCLUDED_COMPANIES:
+        return None
     row = conn.execute(
         "SELECT fit_rating, fit_notes FROM seen_jobs "
         "WHERE title = ? AND company = ? AND fit_rating NOT IN ('', 'Unknown') "
@@ -788,6 +818,13 @@ def run_cli(portal_cfg: dict, args: list[str]) -> list[dict]:
             salvaged = _extract_results_from_text(result.stdout)
             if salvaged:
                 print(f"  [INFO] {portal_cfg['name']}: partial JSON, salvaged {len(salvaged)} results", file=sys.stderr)
+            else:
+                # Must not stay silent here — a genuine parse failure with no
+                # salvageable results looks identical to "0 new listings" if
+                # nothing is logged, and a real portal-CLI failure gets
+                # mistaken for an unusually quiet day.
+                print(f"  [WARN] {portal_cfg['name']}: could not parse CLI output as JSON "
+                      f"and salvage found nothing — stdout[:200]={result.stdout[:200]!r}", file=sys.stderr)
             return salvaged
         # Normalise: results list may live under different keys
         if isinstance(data, list):
@@ -863,6 +900,19 @@ def is_stale(detail_text: str, portal_name: str) -> bool:
     # jobfinder-lu is deliberately NOT in this set: its detail plain-text output
     # includes a parseable "Online since: <ISO datetime>" line, so the real
     # staleness check below can run instead of skipping the check entirely.
+    #
+    # Known imprecision, not fixed: jobindex's own --jobage filter only accepts
+    # discrete steps (1/7/14/30/9999 days — see JOBINDEX_JOBAGE), which doesn't
+    # line up with MAX_AGE_HOURS scaling continuously with --since-days, so a
+    # run with an in-between window (e.g. --since-days 5) can let listings up
+    # to ~2 days past the intended cutoff through unchecked. Similarly, jobnet
+    # searches hardcode --per-page 10 regardless of the search window's width
+    # (see the jobnet entries in PORTALS below), so a wide --since-days run can
+    # silently truncate jobnet coverage for high-volume terms without any
+    # warning, since being "trusted" here means it's never flagged as
+    # incomplete. Both are accepted simplifications of relying on server-side
+    # filtering rather than newly introduced bugs — revisit if either portal's
+    # results start looking incomplete on wide catch-up runs.
     TRUSTED_PORTALS = {"jobindex", "jobnet", "jobdanmark", "jobbank-ca"}
     if portal_name in TRUSTED_PORTALS:
         return False
@@ -893,6 +943,7 @@ def fetch_detail(portal_cfg: dict, job_id: str) -> str:
 
 def _parse_fit_block(block_text: str) -> tuple[str, str]:
     rating, notes = "Unknown", (block_text.strip()[:200] or "No response for this job.")
+    unrecognized_raw = None
     for line in block_text.splitlines():
         line = line.strip()
         if line.startswith("RATING:"):
@@ -907,9 +958,19 @@ def _parse_fit_block(block_text: str) -> tuple[str, str]:
             elif "no fit" in low:
                 rating = "No Fit"
             else:
-                rating = raw
+                # An unrecognized rating string must never become the bucket
+                # key itself — write_digest() only ever prints the 5 known
+                # buckets, so anything else would silently vanish from every
+                # section of the digest while still counting as "evaluated".
+                rating = "Unknown"
+                unrecognized_raw = raw
         elif line.startswith("REASON:"):
             notes = line.split(":", 1)[1].strip()
+    if unrecognized_raw is not None:
+        # Keep the raw rating text visible rather than losing it — append
+        # rather than overwrite so a real REASON line (processed after
+        # RATING in the loop above) isn't clobbered by this diagnostic.
+        notes = f"{notes} [unrecognized rating from model: {unrecognized_raw!r}]"
     return rating, notes
 
 
@@ -955,7 +1016,8 @@ def evaluate_fit_batch(jobs: list[dict]) -> list[tuple[str, str]]:
         )
         for n, j in enumerate(evaluable_jobs, 1)
     )
-    prompt = FIT_PROMPT_BATCH_TEMPLATE.format(n=len(evaluable_jobs), jobs=job_blocks)
+    prompt = FIT_PROMPT_BATCH_TEMPLATE.format(
+        n=len(evaluable_jobs), candidate_profile=CANDIDATE_PROFILE, jobs=job_blocks)
 
     try:
         result = _run_with_group_kill(

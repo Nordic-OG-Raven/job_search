@@ -1,7 +1,7 @@
 ---
 name: career-roi
 description: Ranks the highest-ROI ways to spend spare time toward landing a role — portfolio projects, certifications, refresher courses, LinkedIn posts, YouTube content, formal education — based on real coverage gaps against the live job market. Triggers on: /career-roi, career-roi, how should I spend my time, highest ROI, what should I do to stand out, portfolio project ideas, should I get a certification
-allowed-tools: Read, Write, Glob, Grep, WebSearch, Bash(scripts/bun_guarded.py *), Bash(sqlite3 *)
+allowed-tools: Read, Write, Glob, Grep, WebSearch, WebFetch, Bash(scripts/bun_guarded.py *), Bash(sqlite3 *)
 ---
 
 # Career ROI
