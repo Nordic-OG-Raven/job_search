@@ -4,11 +4,11 @@
 
 # AI Job Search
 
-An AI-powered job application framework built on [Claude Code](https://claude.com/claude-code). Fork it, fill in your profile, and let Claude evaluate job postings, tailor your CV, write cover letters, and prepare you for interviews.
+An AI-powered job application framework built on [Claude Code](https://claude.com/claude-code). Fork it, fill in your profile, and let Claude evaluate job postings, tailor your CV, write cover letters, and prepare you for interviews. A fork of [Mads Lorentzen](https://github.com/MadsLorentzen)'s [ai-job-search](https://github.com/MadsLorentzen/ai-job-search) — see [Acknowledgements](#acknowledgements) for the full attribution and what this fork adds.
 
 ## What this is
 
-A structured workflow that turns Claude Code into a full-stack job application assistant. The core workflow (self-profiling, fit evaluation, and the drafter-reviewer application pipeline) is **language- and country-agnostic**. The job portal search skills are built for the Danish market (Jobindex, Jobnet, Akademikernes Jobbank, etc.), but the pattern is designed to be swapped for your local job boards.
+A structured workflow that turns Claude Code into a full-stack job application assistant. The core workflow (self-profiling, fit evaluation, and the drafter-reviewer application pipeline) is **language- and country-agnostic**. The job portal search skills currently cover Denmark (Jobindex, Jobnet, Jobdanmark, Akademikernes Jobbank), Luxembourg, Switzerland, Australia, and Canada, but the pattern is designed to be swapped or extended for your local job boards.
 
 ```
 /setup          /scrape              /apply <url>
@@ -40,8 +40,8 @@ The framework encodes career guidance best practices, including structured evalu
 ### 1. Fork and clone
 
 ```bash
-gh repo fork MadsLorentzen/ai-job-search --clone
-cd ai-job-search
+gh repo fork Nordic-OG-Raven/job_search --clone
+cd job_search
 ```
 
 ### 2. Install job search tools
@@ -94,20 +94,27 @@ This runs the full workflow: evaluate fit, draft CV + cover letter, review with 
 `/setup`, `/scrape`, and `/apply` form the core workflow. Two more commands extend it once your profile is in place:
 
 - **`/expand`** enriches your profile by scanning public sources you've already linked in it (GitHub repos, portfolio site, Kaggle, Google Scholar) and looking up syllabi for named courses and certifications. Discovered competencies are added to your profile with a source tag. Useful right after `/setup` to surface skills that documents alone don't make explicit.
+- **`/build-master-cv`** mines an entire archive of old CVs and cover letters (`documents/all_cvs/`) into your profile — cross-references them against what's already there, adds what's genuinely new, and flags contradictions (mismatched dates, conflicting claims) instead of silently guessing which version is right, then regenerates `cv/main_master.tex` as a single comprehensive master CV. Safe to re-run repeatedly as you add more source material.
 - **`/upskill`** analyzes the gap between your profile and your tracked job postings (or a single posting via `/upskill <URL>`). Produces a prioritized heatmap of skill gaps and a learning plan with web-searched study resources and time estimates. Useful for career planning between applications.
+- **`/career-roi`** goes further than `/upskill`: it sources requirements from the live job market (not just your applied-to history) and ranks a mixed list of portfolio projects, certifications, courses, and content ideas — not just courses — by impact, employer-facing signal strength, and time cost. Built for figuring out the single highest-leverage thing to do with spare time during a search.
 
 `/reset` is also available, see [Starting over](#starting-over) below.
+
+## Automated daily scan
+
+Separately from the interactive `/scrape` and `/apply` workflow above, `scripts/morning_scan.py` is a standalone script (not a Claude Code skill — it runs outside Claude Code entirely, via cron or launchd) that scans every configured portal every morning, evaluates new listings for fit, and writes a digest to `scripts/daily_digests/YYYY-MM-DD.md`. It's built to run unattended for months: LLM evaluations are batched to cut process overhead roughly 5x, batch size adapts down under memory pressure instead of failing outright, reposted listings get their rating copied instead of re-evaluated, and a single-instance lock prevents overlapping runs. See the script's own docstring and `candidate_profile.example.txt` for setup — it needs its own copy of your profile in `scripts/candidate_profile.txt` (gitignored), separate from the interactive workflow's `CLAUDE.md`.
 
 ## File structure
 
 ```
-ai-job-search/
+job_search/
 ├── CLAUDE.md                          # Main candidate profile + workflow rules
 ├── .claude/
 │   ├── commands/
 │   │   ├── apply.md                   # /apply workflow (drafter-reviewer)
 │   │   ├── setup.md                   # /setup onboarding (documents folder, CV import, or interview)
 │   │   ├── expand.md                  # /expand competency enrichment from documents and online presence
+│   │   ├── build-master-cv.md         # /build-master-cv mines documents/all_cvs/ into your profile
 │   │   └── reset.md                   # /reset wipe profile data or documents folder
 │   ├── skills/
 │   │   ├── job-application-assistant/  # Core application skill
@@ -121,6 +128,7 @@ ai-job-search/
 │   │   │   └── 07-interview-prep.md   # STAR examples + interview framework
 │   │   ├── job-scraper/               # Job search orchestration
 │   │   ├── upskill/                   # /upskill skill gap analysis and learning plan
+│   │   ├── career-roi/                # /career-roi: ranks portfolio/cert/course/content ideas by ROI
 │   │   ├── jobbank-search/            # Akademikernes Jobbank (Denmark) CLI tool
 │   │   ├── jobdanmark-search/         # Jobdanmark.dk (Denmark) CLI tool
 │   │   ├── jobindex-search/           # Jobindex.dk (Denmark) CLI tool
@@ -130,6 +138,11 @@ ai-job-search/
 │   │   ├── workforce-au-search/       # Workforce Australia CLI tool
 │   │   └── jobbank-ca-search/         # Job Bank (Canada) CLI tool
 │   └── settings.local.json            # Claude Code permissions
+├── scripts/                           # Automated daily scan (runs standalone, outside Claude Code)
+│   ├── morning_scan.py                # Scans all portals, batches LLM fit evaluation, writes a digest
+│   ├── bun_guarded.py                 # Concurrency-capped wrapper around the portal CLI tools
+│   ├── candidate_profile.example.txt  # Template — copy to candidate_profile.txt with your own details
+│   └── daily_digests/                 # One markdown digest per day (generated, gitignored)
 ├── cv/
 │   └── main_example.tex               # moderncv LaTeX template
 ├── cover_letters/
@@ -137,7 +150,7 @@ ai-job-search/
 │   └── OpenFonts/                     # Lato + Raleway fonts
 ├── documents/                         # Career source materials for /setup Path A and /expand
 │   ├── README.md                      # Folder layout instructions
-│   ├── cv/                            # Master CV (PDF or .tex)
+│   ├── all_cvs/                       # Archive of old CVs for /build-master-cv to mine
 │   ├── linkedin/                      # LinkedIn profile export (PDF)
 │   ├── diplomas/                      # Degree certificates and transcripts
 │   ├── references/                    # Reference letters
@@ -148,6 +161,7 @@ ai-job-search/
 │   └── README_SALARY_TOOL.md          # Salary tool setup instructions
 ├── job_scraper/                       # Scraper state (seen jobs, results)
 ├── upskill/                           # /upskill report output (markdown reports per run)
+├── career-roi/                        # /career-roi report output (markdown reports per run)
 ├── job_search_tracker.csv             # Application tracking spreadsheet
 └── SETUP.md                           # Detailed setup guide
 ```
@@ -244,7 +258,10 @@ To get the most from this, invest time during `/setup` in describing not just yo
 
 ## Acknowledgements
 
-- [Mikkel Krogholm](https://github.com/mikkelkrogsholm) ([skills repo](https://github.com/mikkelkrogsholm/skills)) for the job search CLI skills
+This is a fork of [Mads Lorentzen](https://github.com/MadsLorentzen)'s [ai-job-search](https://github.com/MadsLorentzen/ai-job-search) — the self-profiling workflow, fit-evaluation-before-drafting approach, and drafter-reviewer application pipeline are his design; [he wrote up the thinking behind it here](https://www.linkedin.com/pulse/i-automated-my-job-search-made-process-more-human-mads-lorentzen-phd-38bje). This fork adds the automated daily scan (`scripts/`), the `/career-roi` and `/build-master-cv` skills, and covers Luxembourg, Switzerland, Australia, and Canada alongside Denmark.
+
+- [Mads Lorentzen](https://github.com/MadsLorentzen) ([ai-job-search](https://github.com/MadsLorentzen/ai-job-search)) for the original framework
+- [Mikkel Krogsholm](https://github.com/mikkelkrogsholm) ([skills repo](https://github.com/mikkelkrogsholm/skills)) for the original job search CLI skills
 - Built with [Claude Code](https://claude.com/claude-code) by [Anthropic](https://anthropic.com)
 
 ## License

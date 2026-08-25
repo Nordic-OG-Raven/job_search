@@ -43,8 +43,8 @@ The CV compiles with `lualatex` (pdflatex often fails on modern MiKTeX installs 
 ## 2. Fork and clone
 
 ```bash
-gh repo fork MadsLorentzen/ai-job-search --clone
-cd ai-job-search
+gh repo fork Nordic-OG-Raven/job_search --clone
+cd job_search
 ```
 
 Or manually: fork on GitHub, then clone your fork.
