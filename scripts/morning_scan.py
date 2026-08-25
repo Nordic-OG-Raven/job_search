@@ -330,6 +330,18 @@ EVAL_BATCH_SIZE = 5
 # their batch.
 MIN_DESCRIPTION_CHARS = 30
 
+# How much of a job description actually reaches the model. Confirmed on a
+# real production posting (Terma, 8,908 chars): a 3000-char limit cut the
+# description off BEFORE its stated "3-6 years experience" requirement
+# (which sat at char 3948), so the model never saw the one line that should
+# have disqualified it — it wasn't a bad judgment call, it was missing
+# information. Detailed corporate postings routinely run well past 3000
+# chars (company intro + role + responsibilities before the requirements
+# section even starts), and Haiku's context window has enormous headroom
+# even for a batch of 5 at this size — there was never a real reason for the
+# limit to be this tight. Raised with margin over the real case that broke it.
+MAX_DESCRIPTION_CHARS = 8000
+
 def _load_candidate_profile() -> str:
     """
     The fit-evaluation prompt needs a real candidate bio, location rules, and
@@ -1012,7 +1024,7 @@ def evaluate_fit_batch(jobs: list[dict]) -> list[tuple[str, str]]:
     job_blocks = "\n".join(
         FIT_PROMPT_JOB_BLOCK.format(
             n=n, title=safe(j["title"][:200]), company=safe(j["company"][:100]),
-            portal=j["portal"], description=safe(j["description"][:3000]),
+            portal=j["portal"], description=safe(j["description"][:MAX_DESCRIPTION_CHARS]),
         )
         for n, j in enumerate(evaluable_jobs, 1)
     )
