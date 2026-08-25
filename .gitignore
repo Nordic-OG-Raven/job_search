@@ -1,6 +1,6 @@
-# Dependencies
+# Dependencies (bun.lock is NOT ignored — lock files should be committed
+# for reproducible installs; only node_modules/ itself is a build artifact)
 node_modules/
-bun.lock
 
 # Python
 __pycache__/
