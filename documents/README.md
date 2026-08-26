@@ -2,6 +2,8 @@
 
 This folder holds your actual career documents. The `/setup` command reads everything here and uses it to populate the candidate skill files under `.claude/skills/job-application-assistant/`. It is safe to re-run `/setup` as you add new documents — it merges intelligently and will never overwrite existing content without asking you first.
 
+**First time here with just one current CV?** You don't need to drop it anywhere in this folder — just mention its file path with `@` (or paste its text) when you run `/setup`; Path A reads it directly. `all_cvs/` below is specifically an *archive of old/historical* CVs for `/build-master-cv` to mine later, not a required drop point for onboarding.
+
 ---
 
 ## Folder Structure

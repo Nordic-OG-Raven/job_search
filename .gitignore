@@ -52,7 +52,6 @@ cover_letters/cover_*.tex
 cover_letters/Cover_*.tex
 
 # documents/ subfolder contents are personal — only README and folder structure are tracked
-documents/cv/**
 documents/linkedin/**
 documents/diplomas/**
 documents/references/**
@@ -89,3 +88,7 @@ scripts/candidate_profile.txt
 
 # Candidate-profile merge log (contains PII by design — generated during /setup, /expand)
 .claude/skills/job-application-assistant/00-merge-changelog.md
+
+# Your personal profile — copy from CLAUDE.md.example and run /setup to populate.
+# Never commit this: it ends up containing your name, salary expectations, and full work history.
+CLAUDE.md

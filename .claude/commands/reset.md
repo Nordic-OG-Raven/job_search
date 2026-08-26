@@ -38,6 +38,7 @@ Before doing anything, show the user precisely what will be wiped.
 
 Read the current state of these files and report whether each has content or is already empty:
 
+- `CLAUDE.md` *(Candidate Profile section only — Role, Automated Daily Scan, Repo Structure, and all other framework sections are preserved)*
 - `.claude/skills/job-application-assistant/01-candidate-profile.md`
 - `.claude/skills/job-application-assistant/02-behavioral-profile.md`
 - `.claude/skills/job-application-assistant/05-cv-templates.md` *(profile statements section only — framework structure is preserved)*
@@ -47,6 +48,13 @@ Present as:
 
 ```
 ## Profile reset will clear:
+
+- CLAUDE.md — [has candidate data / already blank]
+  The Candidate Profile section (Identity, Education, Professional Experience, Technical
+  Skills, Certifications, Awards, Behavioral Profile, What Excites You, Target Sectors,
+  Deal-breakers) will be replaced with the blank structure from CLAUDE.md.example.
+  Everything else in the file (Role, Automated Daily Scan, Repo Structure, workflow and
+  verification sections) is preserved.
 
 - 01-candidate-profile.md — [has content / already empty]
   Full file will be replaced with a blank template.
@@ -110,6 +118,43 @@ Wait for the user's response.
 ## Step 3: Execute the Reset
 
 ### Profile reset
+
+**For `CLAUDE.md`**, replace only the content between the `## Candidate Profile` heading and the next `## Repo Structure` heading with:
+
+```markdown
+## Candidate Profile
+
+<!-- Run /setup to populate this section. Everything below is placeholder structure only. -->
+
+### Identity
+- **Name:**
+- **Location:**
+- **Languages:**
+- **Status:**
+- **LinkedIn headline:**
+- **Salary expectations:**
+
+### Education
+
+### Professional Experience
+
+### Technical Skills
+
+### Certifications
+
+### Awards
+
+### Behavioral Profile
+
+### What Excites You
+
+### Target Sectors
+
+### Deal-breakers
+
+```
+
+Leave every other section of `CLAUDE.md` untouched (Role, Automated Daily Scan, Repo Structure, Job Search Portal CLI Tools, Workflow, Verification Checklist). If `CLAUDE.md` doesn't exist yet (never set up), skip this file and note it in the report as "not present."
 
 **For `01-candidate-profile.md`**, replace the file content with:
 

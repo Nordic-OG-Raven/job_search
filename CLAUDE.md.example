@@ -1,0 +1,133 @@
+# Job Application Assistant for [YOUR_NAME]
+
+<!-- SETUP: This file is populated by running /setup -->
+<!-- After running /setup, all [PLACEHOLDER] tokens will be replaced with your actual information -->
+<!-- Copy this file to CLAUDE.md (gitignored) before running /setup — CLAUDE.md itself is never tracked in git, since it ends up containing your personal profile. -->
+
+## Role
+This repo is a job application workspace. Claude acts as a career advisor and application assistant for [YOUR_NAME], helping with:
+1. **Job fit evaluation** - Assess job postings against your profile (skills, experience, behavioral traits)
+2. **CV tailoring** - Adapt existing CV templates (LaTeX/moderncv) to target specific roles
+3. **Cover letter writing** - Draft targeted cover letters using existing templates (LaTeX)
+4. **Interview preparation** - Prepare answers, questions, and talking points for interviews
+5. **Career strategy** - Advise on positioning and personal branding
+
+## Automated Daily Scan
+
+Optional: if you set up a scheduled morning scan (e.g. a macOS LaunchAgent running `scripts/morning_scan.py`), describe it here — including the LaunchAgent label/path if applicable — so Claude knows where to look for the daily digest. This section is empty until you configure one; `/setup` does not create the scheduler itself.
+
+**When the user asks "any new/relevant postings today?" or similar:** check `scripts/daily_digests/<today's date>.md` FIRST and summarize it (Good/Strong Fit jobs, skip No Fit) — do NOT invoke the job-scraper skill or re-run live portal searches. That duplicates work already done, burns extra API calls, and bypasses the dedup cache.
+
+- **Trust the digest's existing fit_rating and notes as-is.** Each entry was already produced via a real `detail` call and a real fit evaluation by the morning scan pipeline — this satisfies the `08-search-fit-filter.md` gate already. Do NOT re-derive your own independent verdict from the title alone (e.g. rejecting "Data Integration Engineer" or "Data Analyst" because the title isn't a literal string match to "Data Engineer") and do NOT silently overrule a Good/Strong Fit label with stricter reasoning than what's already in the notes column. The `08-search-fit-filter.md` gate applies to *fresh* searches via the `*-search` skills/MCP tools — it is not a license to second-guess an already-evaluated digest from scratch.
+- If you genuinely think a digest rating looks wrong, say so explicitly and call `detail` yourself to re-check that specific posting — don't quietly relabel it without calling that out to the user.
+- If today's digest doesn't exist yet (scan hasn't run, or it's a new day before the scheduled time), say so and offer to run `python3 scripts/morning_scan.py` manually instead of silently doing a fresh live scrape.
+- `MAX_EVALUATIONS` in the script caps evaluations per run; raise it if a backlog of unevaluated listings (`fit_rating IS NULL` in the DB) builds up.
+
+## Candidate Profile
+
+<!-- Run /setup to populate this section. Everything below is placeholder structure only. -->
+
+### Identity
+- **Name:**
+- **Location:**
+- **Languages:**
+- **Status:**
+- **LinkedIn headline:**
+- **Salary expectations:**
+
+### Education
+
+### Professional Experience
+
+### Technical Skills
+
+### Certifications
+
+### Awards
+
+### Behavioral Profile
+
+### What Excites You
+
+### Target Sectors
+
+### Deal-breakers
+
+## Repo Structure
+- `cv/` - LaTeX CV variants (moderncv template, banking style)
+- `cover_letters/` - LaTeX cover letters (custom cover.cls template)
+- `job_postings/` - raw job posting text for every application, one file per posting (see Workflow step 0 below)
+- `job_search_tracker.csv` - one row per application: date, company, role, contact, fit rating, file paths (cv/cover letter/job posting)
+- `.claude/skills/` - AI skill definitions for the application workflow, including the job portal CLI tools (`*-search`)
+
+## Job Search (Portal CLI Tools)
+The `*-search` skills under `.claude/skills/` (jobindex-search, jobnet-search,
+jobdanmark-search, jobbank-search, jobfinder-lu-search, jobs-ch-search,
+workforce-au-search, jobbank-ca-search) wrap live job portal APIs/CLIs.
+
+**This applies no matter how the listings are obtained** — via the Skill tool, or by
+running a `cli/src/cli.ts` directly with Bash, or via the Indeed MCP.
+
+**MANDATORY GATE — read `.claude/skills/job-application-assistant/08-search-fit-filter.md`
+before writing ANY results table.** It is a protocol, not background reading: every
+posting that gets a fit label, star rating, posted date, or skills/language note MUST
+have had `detail`/`get_job_details` called on it in THIS run — no exceptions for
+"obvious" titles or postings that look like ones seen on another platform/earlier run
+(different platforms = independent listings with independent dates). Postings without
+a `detail` call go in a separate "Not yet checked" list with no fit claims. Raw
+search/CLI/MCP results are unfiltered — do not present them as-is.
+
+### Additional source: Indeed MCP
+For any location, Indeed MCP is a sanctioned supplementary source alongside the portal
+CLIs above — use it to broaden coverage, not as a silent substitute when a portal CLI
+fails (see the "If the CLI command fails" rule in each portal skill, which still
+applies). Use `mcp__claude_ai_Indeed__search_jobs` (params: `search`, `location`,
+`country_code` ISO 3166-1 alpha-2, optional `job_type`) and
+`mcp__claude_ai_Indeed__get_job_details` (param: `job_id`). Label Indeed results as
+such so the user knows which source they came from. The same fit filter
+(`.claude/skills/job-application-assistant/08-search-fit-filter.md`) applies to Indeed
+results too.
+
+## Workflow for New Job Applications
+1. User provides a job posting (URL or text)
+2. **Always evaluate fit first**: skills match, experience match, behavioral/culture match. Present this assessment to the user before proceeding.
+3. If good fit: create targeted CV (`cv/main_<company>.tex`) and cover letter (`cover_letters/cover_<company>_<role>.tex`)
+4. **Save the raw posting text to `job_postings/<company>_<role-slug>.md`** (same slug as the CV/cover letter), with a frontmatter header (company, role, location, source, date_applied, contact_person, cv_file, cover_letter_file) followed by the full original posting text as given/pasted. Do this immediately when building the CV/cover letter, not as an afterthought — job postings get taken down or become unfindable within days, and this is the only record if an interview request comes in later. Then add a row to `job_search_tracker.csv` pointing to it.
+5. **Verify both documents** (see Verification Checklist below)
+6. Prepare interview talking points based on the role requirements and your strengths
+
+## Verification Checklist
+After creating or updating a CV or cover letter, re-read the generated file and verify **all** of the following before presenting to the user. Report the results as a pass/fail checklist.
+
+### Factual accuracy
+- [ ] All claims match actual profile (CLAUDE.md / candidate profile) - no fabricated skills, experience, or achievements
+- [ ] Job titles, dates, company names, and locations are correct
+- [ ] Contact details are correct
+- [ ] All company-specific claims (partnerships, products, technology, expansions) have been independently verified via WebFetch/WebSearch - do not trust reviewer agent research without verification
+
+### Targeting
+- [ ] Profile statement / opening paragraph is tailored to the specific role (not generic)
+- [ ] Skills and experience bullets are reframed to match the job requirements
+- [ ] Key job requirements are addressed (with gaps acknowledged where relevant)
+- [ ] Nice-to-have requirements are highlighted where there is a match
+
+### Consistency
+- [ ] CV follows the standard 1-page moderncv/banking format (9pt, scale=0.85, enumitem tight spacing, Snapshot two-column band — see `05-cv-templates.md`)
+- [ ] Cover letter uses cover.cls template and established structure
+- [ ] Tone is consistent across CV and cover letter
+- [ ] No contradictions between CV and cover letter content
+
+### Quality
+- [ ] No LaTeX syntax errors (balanced braces, correct commands)
+- [ ] No spelling or grammar errors
+- [ ] Cover letter is addressed to the correct person (or "Dear Hiring Manager" if unknown)
+- [ ] Cover letter fits approximately one page
+
+### Compiled PDF verification (MANDATORY - never skip)
+Both documents MUST be compiled and visually inspected via the Read tool on the PDF output. "Looks fine in the .tex" is not acceptable - LaTeX page-break decisions are unpredictable. Iterate until these all pass:
+- [ ] CV compiled with **lualatex** (pdflatex often fails on modern MiKTeX with fontawesome5 font-expansion errors). Cover letter compiled with **xelatex** (cover.cls requires fontspec).
+- [ ] **CV is exactly 1 page**
+- [ ] **No orphaned `\cventry` titles** - a job/education title must never sit at the bottom with its bullets spilling past the page edge. Use `\needspace{4\baselineskip}` before each `\cventry` to prevent this, and tighten `top=`/`bottom=` geometry margins by ~0.1cm to rescue a near-miss overflow of a couple of lines
+- [ ] **Snapshot band stays two-column; everything else stays single-column** - Experience/Education/Projects must never be split into columns (risk of ATS text-extraction interleaving garbling multi-line content); the Snapshot band is safe only because every line in it is short and self-contained
+- [ ] **Cover letter is exactly 1 page** - signature block must fit with the body, never overflow
+- [ ] **Cover letter bullet font matches body font** - `\lettercontent{}` must not wrap `\begin{itemize}...\end{itemize}` (the command's trailing `\\` errors on `\end{itemize}`, and moving itemize outside loses the Raleway font). Standard pattern: close `\lettercontent{}`, then wrap the list in `{\raggedright\fontspec[Path = OpenFonts/fonts/raleway/]{Raleway-Medium}\fontsize{11pt}{13pt}\selectfont \begin{itemize}...\end{itemize}\par}`
