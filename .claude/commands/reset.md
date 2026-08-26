@@ -41,8 +41,10 @@ Read the current state of these files and report whether each has content or is 
 - `CLAUDE.md` *(Candidate Profile section only — Role, Automated Daily Scan, Repo Structure, and all other framework sections are preserved)*
 - `.claude/skills/job-application-assistant/01-candidate-profile.md`
 - `.claude/skills/job-application-assistant/02-behavioral-profile.md`
+- `.claude/skills/job-application-assistant/04-job-evaluation.md` *(role-type match areas, career goals, and life-situation alignment only — scoring framework and thresholds are preserved)*
 - `.claude/skills/job-application-assistant/05-cv-templates.md` *(profile statements section only — framework structure is preserved)*
 - `.claude/skills/job-application-assistant/07-interview-prep.md` *(STAR examples and STAR candidates sections only — framework structure is preserved)*
+- `.claude/skills/job-application-assistant/08-search-fit-filter.md` *(experience-level summary and language list only — protocol steps are preserved)*
 
 Present as:
 
@@ -70,7 +72,6 @@ Present as:
 
 The following files are NOT touched (they contain framework rules, not candidate data):
   - 03-writing-style.md
-  - 04-job-evaluation.md
   - 06-cover-letter-templates.md
 ```
 
@@ -202,6 +203,37 @@ Leave every other section of `CLAUDE.md` untouched (Role, Automated Daily Scan, 
 ## Using This in Applications
 ```
 
+**For `04-job-evaluation.md`**, replace the three role-type match lines under "Experience Match" with:
+
+```markdown
+<!-- SETUP: populate Strong/Moderate/Entry-level role-type match areas based on your actual experience -->
+**Strong:** [ROLE TYPES where your professional experience directly matches]
+**Moderate:** [ROLE TYPES with related/transferable experience]
+**Entry-level:** [ROLE TYPES with academic exposure but limited professional experience]
+```
+
+Replace the "Career goals" block under "Career Alignment & Motivation" with:
+
+```markdown
+<!-- SETUP: populate near/medium/long-term career goals based on your actual aspirations -->
+**Career goals:**
+- **Near-term (0–2 years):** [YOUR_NEAR_TERM_GOAL]
+- **Medium-term (2–5 years):** [YOUR_MEDIUM_TERM_GOAL]
+- **Long-term:** [YOUR_LONG_TERM_GOAL]
+```
+
+Replace the "Life situation alignment" block with:
+
+```markdown
+<!-- SETUP: populate your actual life-situation constraints -->
+**Life situation alignment:** Consider personal constraints:
+- **Security:** [YOUR_EMPLOYMENT_STATUS_AND_SALARY_FLOOR/TARGET]
+- **Flexibility:** [YOUR_RELOCATION_TIERS]
+- **Professional development:** [WHETHER GROWTH/TRAINING IS A PRIMARY MOTIVATOR FOR YOU]
+```
+
+Leave all other content in `04-job-evaluation.md` intact (scoring dimensions, weighting, thresholds, output format, pre-application call guidance).
+
 **For `05-cv-templates.md`**, locate the section that begins with `**Profile statement templates` and extends through the role-specific template blocks. Replace only that section with:
 
 ```markdown
@@ -225,6 +257,23 @@ Replace with:
 ```
 
 Leave all other content in `07-interview-prep.md` intact (STAR format explanation, tough questions, questions to ask interviewers, phone/video tips, follow-up etiquette, roleplay guidelines).
+
+**For `08-search-fit-filter.md`**, replace the "Experience level" paragraph with:
+
+```markdown
+<!-- SETUP: populate your actual experience level and career goal summary -->
+[YOUR_EXPERIENCE_LEVEL_SUMMARY — e.g. degree status, professional tenure by role type,
+and reference to your career goal in `04-job-evaluation.md`]
+```
+
+Replace the "Candidate languages" line under "Language" with:
+
+```markdown
+<!-- SETUP: populate your actual languages and fluency levels -->
+Candidate languages: [YOUR_LANGUAGES_WITH_FLUENCY_LEVELS].
+```
+
+Leave all other content in `08-search-fit-filter.md` intact (the search/detail/table protocol, experience-level exclusion rules, self-check checklist).
 
 ### Documents reset
 
