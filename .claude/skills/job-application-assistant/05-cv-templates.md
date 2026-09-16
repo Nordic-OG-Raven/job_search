@@ -46,6 +46,16 @@ Expected output: `Output written on main_<company>.pdf (1 page, ...)`. Any page 
 \setlist{noitemsep, topsep=1pt, parsep=0pt, partopsep=0pt, leftmargin=*}
 % enumitem's tight defaults are what make the 1-page target achievable at 9pt —
 % do not remove \setlist or reintroduce manual \vspace between \item entries.
+\renewcommand*{\labelitemi}{\textcolor{color1}{\textbullet}}
+% MANDATORY, do not remove: moderncv's classic style redefines the level-1 itemize
+% bullet to \faCircle (a FontAwesome5 icon glyph, moderncviconsawesome.sty) instead
+% of a plain character. Icon-font glyphs extract unreliably from the PDF text stream
+% (same failure class as the phone/email icons extracting as "MOBILE-ALT"/"Envelope")
+% and have been confirmed to break ATS resume parsers (Workday's "Autofill with
+% Resume") — ALL level-1 bullets throughout the CV (Snapshot items, cventry
+% description bullets, Projects, etc.) inherit this bug, since \cventry description
+% bullets are an itemize at whatever depth they're written at, level 1 by default.
+% This line forces a plain-text bullet character everywhere instead.
 
 % Personal data
 \name{[FIRST_NAME]}{[LAST_NAME]}
@@ -194,6 +204,7 @@ After writing the CV and before presenting to the user, always compile and visua
 2. Check the output page count: must be exactly 1
 3. Read the PDF via the Read tool and visually inspect the page
 4. Check for **orphaned entries**: a `\cventry` title line must never sit alone at the bottom with its bullets pushed past the page edge; also check the Snapshot band didn't force an overfull-hbox line wrap that clips text (check the compile log for "Overfull \hbox" warnings above ~15pt, which usually means a Snapshot column line is too long)
+5. **ATS text-extraction check (mandatory):** run `pdftotext main_<company>.pdf -` (raw stream order, no `-layout`) and read the output. Every job/education entry's bullets must appear as a clean, contiguous block with no stray characters (bullet glyphs, icon-name artifacts) interrupting the middle of a description — that's what ATS parsers like Workday's "Autofill with Resume" actually read, and a stray character there causes them to truncate the description mid-way. See the `\needspace`/`\item{\cventry` warning above for the confirmed cause of this failure mode.
 
 ### Fixing common page-break problems
 
@@ -201,9 +212,11 @@ After writing the CV and before presenting to the user, always compile and visua
 Add `\needspace{4\baselineskip}` immediately before the problematic `\cventry` (4 is enough at 9pt/scale=0.85 — larger values consume too much space and push other content off the 1-page limit):
 ```latex
 \needspace{4\baselineskip}
-\item{\cventry{YEAR--YEAR}{Role Title}{Organization}{Location}{}{...}}
+\cventry{YEAR--YEAR}{Role Title}{Organization}{Location}{}{...}
 ```
 Include `\usepackage{needspace}` in the preamble. Only add it for the specific entry that actually orphans — do not add it to every entry as a precaution.
+
+**Never wrap `\cventry` in `\item{...}` / `\begin{itemize}`.** `\needspace` works standalone — it needs no list environment. Wrapping `\cventry` in an outer itemize renders a stray, unaligned bullet glyph (moderncv can't align it with the entry's own date/content columns) that floats in the left margin at an arbitrary vertical position — often landing mid-description. This is purely cosmetic in a quick glance but it is a confirmed ATS-breaker: text-based resume parsers (e.g. Workday's "Autofill with Resume") read the PDF's linear text-extraction stream, not the visual layout, and that stray glyph reads as a false record/section boundary — causing the parser to truncate the job description after the first bullet and drop the rest. Verify with `pdftotext <file>.pdf -` (no `-layout`) and confirm every bullet under a role reads as a clean, uninterrupted block with no stray characters between them.
 
 **Problem: content overflows to a second page**
 The standard tailored CV settings (9pt, scale=0.85, `enumitem` tight spacing, Snapshot band) leave very little layout slack — if it still overflows, cut content first. See "Relevance-weighted cutting" below for the rule. Only as a last resort for a near-miss overflow (a couple of lines), tighten `top=`/`bottom=` in the geometry package by another ~0.1cm — do not go below `top=0.6cm` or the header starts crowding the page edge.
