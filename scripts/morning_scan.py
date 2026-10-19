@@ -23,6 +23,7 @@ import tempfile
 import threading
 import time
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -438,11 +439,10 @@ if _portal_filter_raw:
 # or drop a job's block (those fall through to Unknown and get redone next run,
 # but that wastes the spawn) — 10 is the reliability/efficiency sweet spot.
 EVAL_BATCH_SIZE = 10
-# #7: when RAM is genuinely plentiful, grow the batch toward this ceiling so the
-# fixed ~400MB spawn cost is amortised across more jobs (fewer spawns clear the
-# same backlog). Capped below a size where the model starts mis-numbering or
-# dropping job blocks (those fall through to Unknown and get redone, wasting the
-# spawn). Only engages below MEM_PLENTY_THRESHOLD.
+# The batch ceiling used whenever memory isn't critical (see _adaptive_batch_size):
+# amortises the fixed ~400MB spawn cost across more jobs so a run makes fewer
+# spawns. Capped below a size where the model starts mis-numbering or dropping
+# job blocks (those fall through to Unknown and get redone, wasting the spawn).
 EVAL_BATCH_SIZE_MAX = 15
 
 # A job whose detail-fetch came back empty or near-empty (removed listing,
@@ -1197,60 +1197,67 @@ def _ram_badness_fraction() -> float | None:
         return None
 
 
+def _kernel_pressure_badness() -> float | None:
+    """macOS's OWN memory-pressure verdict, mapped onto our 0..1 badness scale,
+    and the authoritative signal. The raw available/total ratio (_ram_badness_
+    fraction) is far too conservative on Apple Silicon: heavy memory compression
+    reads as "low free RAM" while the kernel still rates pressure normal/warn and
+    the machine stays perfectly responsive (confirmed 2026-10-19 on an 8 GB Mac:
+    the ratio said 0.85 'critical' while the kernel said level 2 'warn', 2.3M
+    pages compressed). kern.memorystatus_vm_pressure_level: 1=normal, 2=warn,
+    4=critical."""
+    try:
+        out = subprocess.run(
+            ["sysctl", "-n", "kern.memorystatus_vm_pressure_level"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout.strip()
+        return {"1": 0.65, "2": 0.80, "4": 0.97}.get(out)
+    except Exception:
+        return None
+
+
 def _memory_badness_fraction() -> float | None:
-    """Unified memory-pressure signal (0..1, higher=worse). Driven primarily by
-    available physical RAM, with the absolute-free-swap backstop able to escalate
-    it toward critical only on genuine swap exhaustion. Returns None (fail-open)
-    if neither sub-signal can be read."""
-    ram = _ram_badness_fraction()
+    """Unified memory-pressure signal (0..1, higher=worse). PRIMARY = the kernel's
+    own pressure level (the macOS-native truth); the absolute-free-swap backstop
+    can still escalate it on genuine swap exhaustion. Falls back to the
+    available-RAM ratio only if the kernel level can't be read."""
+    k = _kernel_pressure_badness()
     swap = _swap_backstop_fraction()
+    if k is not None:
+        return max(k, swap) if swap is not None else k
+    ram = _ram_badness_fraction()
     vals = [v for v in (ram, swap) if v is not None]
     return max(vals) if vals else None
 
 
-# Tiered response to memory pressure: shrink the unit of work (batch size)
-# before ever fully stopping. A full pause used to trigger far too eagerly with
-# nothing in between "normal" and "stopped" — ordinary background load (other
-# apps, other Claude sessions) could halt the whole pipeline even though there
-# was still real, safe headroom for smaller steps. Real pause is now reserved
-# for genuinely critical pressure. Thresholds are on _memory_badness_fraction,
-# so e.g. MEM_COMFORTABLE_THRESHOLD=0.75 means "proceed at full batch while at
-# least ~25% of RAM is reclaimable".
-MEM_PLENTY_THRESHOLD      = 0.60  # below this (>=40% RAM reclaimable): grow batch (#7)
-MEM_COMFORTABLE_THRESHOLD = 0.75  # below this: full EVAL_BATCH_SIZE
-MEM_ELEVATED_THRESHOLD    = 0.85  # below this: half batch size
-MEM_CRITICAL_THRESHOLD    = 0.95  # below this: batch size 1 (minimal footprint,
-                                    # still makes forward progress); at/above
-                                    # this, even one more ~400MB spawn is a real
-                                    # risk (near-total memory exhaustion risks
-                                    # kernel-level instability) — only here abort.
+# Batch-size response to memory pressure. KEY FACT learned 2026-10-19:
+# evaluations run ONE claude --print spawn at a time (sequential), and a spawn is
+# ~400MB regardless of how many jobs are in its prompt — so batch size does NOT
+# change PEAK memory, only how many spawn/free cycles a run does. Shrinking the
+# batch under pressure therefore buys ZERO headroom and just makes the run many
+# times slower (the old code dropped to batch-of-1, ~10x slower, for no memory
+# benefit). So there are only two useful levers: run LARGE batches (fewer spawns
+# = less churn and far faster), and fully PAUSE when even one 400MB spawn is
+# unsafe. No "batch-1" middle tier — if a spawn is affordable at all, make it big.
+MEM_COMFORTABLE_THRESHOLD = 0.75  # at/below: healthy -> largest batch
+MEM_ELEVATED_THRESHOLD    = 0.85  # used only to lengthen the inter-spawn cooldown
+MEM_CRITICAL_THRESHOLD    = 0.95  # above: even one spawn is unsafe -> pause/wait
 MEM_ABORT_THRESHOLD = MEM_CRITICAL_THRESHOLD
 
 
 def _adaptive_batch_size(ceiling: int) -> int:
-    """
-    How many jobs to send to claude --print in one call right now. Re-evaluated
-    on every flush (#5), so it tracks memory that appears OR frees up mid-run —
-    not a one-time launch decision:
-      - plenty of RAM free      -> grow to EVAL_BATCH_SIZE_MAX (#7), amortising
-                                    the fixed ~400MB spawn cost over more jobs
-      - comfortable             -> the requested ceiling (normally EVAL_BATCH_SIZE)
-      - elevated / critical     -> shrink, down to a single job
-      - at/above the abort line -> 0 (caller WAITS, pacing #4 — it never caps the
-                                    total work, only how much it attempts per step)
-    """
+    """Jobs per claude --print spawn right now, re-checked every flush (#5) so it
+    tracks pressure appearing or clearing mid-run. Big batch unless the kernel
+    says critical, in which case 0 => the caller waits (pacing #4) rather than
+    shrinking to a pointless batch-of-1 that would not lower peak memory anyway."""
     frac = _memory_badness_fraction()
     if frac is None:
-        return ceiling
-    if frac <= MEM_PLENTY_THRESHOLD:
         return EVAL_BATCH_SIZE_MAX
+    if frac >= MEM_ABORT_THRESHOLD:
+        return 0                     # critical -> pause and wait
     if frac <= MEM_COMFORTABLE_THRESHOLD:
-        return ceiling
-    if frac <= MEM_ELEVATED_THRESHOLD:
-        return max(1, ceiling // 2)
-    if frac <= MEM_CRITICAL_THRESHOLD:
-        return 1
-    return 0
+        return EVAL_BATCH_SIZE_MAX   # healthy -> biggest batch (fewest spawns)
+    return ceiling                   # warn -> normal batch (same peak; no point shrinking)
 
 
 def _notify(title: str, body: str, subtitle: str = "") -> None:
@@ -1423,6 +1430,16 @@ def _drain_backlog_loop() -> None:
             )
         except Exception as e:
             print(f"[drain] follow-up pass failed to launch: {e} — stopping loop.", file=sys.stderr)
+            return
+
+        # No-progress guard: if a pass resolved nothing, retrying won't help —
+        # stop rather than spin out the remaining rounds (what the disabled-portal
+        # jobs did before they were marked terminal).
+        if _unevaluated_count() >= remaining:
+            print(f"\n[drain] last pass resolved nothing ({remaining} still unevaluated) — "
+                  f"stopping rather than spinning. Inspect those rows if unexpected.",
+                  file=sys.stderr)
+            _write_state(phase="done")
             return
 
     print(f"\n[drain] reached MAX_DRAIN_ROUNDS={MAX_DRAIN_ROUNDS}; "
@@ -1903,6 +1920,117 @@ def _drain_pending(
     return eval_count, stopped_for_memory
 
 
+FETCH_WORKERS = 3  # matches bun_guarded.py's flock SLOTS; detail fetches are tiny
+                   # node subprocesses, safe to run concurrently (unlike the 400MB
+                   # claude spawns, which stay strictly sequential)
+
+
+def _fetch_details_parallel(jobs: list[dict]) -> dict[str, str]:
+    """Fetch full descriptions for several jobs CONCURRENTLY. Detail fetches are
+    independent ~1.4s node subprocesses; running them one-at-a-time was ~19% of a
+    full run's wall-clock for zero reason. bun_guarded.py already caps real
+    concurrency at its flock SLOTS, so FETCH_WORKERS matches that. Returns
+    {job_id: description} ('' on any failure). Keyed by job_id — callers must not
+    mix two jobs with the same id in one window (they never do: a window is a
+    slice of a deduplicated candidate list)."""
+    out: dict[str, str] = {}
+    if not jobs:
+        return out
+    with ThreadPoolExecutor(max_workers=FETCH_WORKERS) as ex:
+        futs = {ex.submit(fetch_detail, j["portal_cfg"], j["job_id"]): j["job_id"] for j in jobs}
+        for fut, jid in futs.items():
+            try:
+                out[jid] = fut.result()
+            except Exception:
+                out[jid] = ""
+    return out
+
+
+def _evaluate_candidates(conn: sqlite3.Connection, candidates: list[dict], eval_count: int,
+                         context: str, *, collect_into: list[dict] | None = None,
+                         verbose: bool = False) -> tuple[int, bool]:
+    """
+    The single eval pipeline shared by the main pass and the redo pass (they used
+    to be two hand-copied loops). `candidates` is an ORDER-PRESERVED list of dicts
+    with keys: portal_cfg, portal, job_id, title, company, url.
+
+    For each window of up to EVAL_BATCH_SIZE_MAX candidates it runs the cheap
+    filters inline (duplicate-rating copy, then title pre-filter), then fetches
+    the survivors' descriptions IN PARALLEL (#throughput) before the empty/stale
+    checks and the batched claude evaluation. Order is preserved, so the Groq
+    relevance ordering still means best-first. Stops at MAX_EVALUATIONS or when a
+    flush pauses for memory. Returns (eval_count, stopped_for_memory).
+    """
+    pending: list[dict] = []
+    stopped = False
+    i, n = 0, len(candidates)
+    while i < n and (eval_count + len(pending)) < MAX_EVALUATIONS and not stopped:
+        # 1) gather a window of fetch-needed survivors (cheap filters first)
+        to_fetch: list[dict] = []
+        while (i < n and len(to_fetch) < EVAL_BATCH_SIZE_MAX
+               and (eval_count + len(pending) + len(to_fetch)) < MAX_EVALUATIONS):
+            c = candidates[i]; i += 1
+            existing = find_existing_rating(conn, c["title"], c["company"], c["portal"], c["job_id"])
+            if existing:
+                rating, notes = existing
+                if verbose:
+                    print(f"  [{c['portal']}] → duplicate of an already-rated listing, copying: {c['title'][:60]}")
+                update_fit(conn, c["portal"], c["job_id"], rating,
+                           f"{notes} (duplicate posting — rating copied from an earlier listing)")
+                continue
+            pf = _prefilter_rating(c["title"])
+            if pf:
+                RUN_STATS["prefiltered"] += 1
+                if verbose:
+                    print(f"  [{c['portal']}] → pre-filtered, no spawn spent: {c['title'][:60]}")
+                update_fit(conn, c["portal"], c["job_id"], pf[0], pf[1])
+                continue
+            to_fetch.append(c)
+
+        if not to_fetch:
+            continue
+
+        # 2) fetch the window's descriptions in parallel
+        details = _fetch_details_parallel(to_fetch)
+
+        # 3) empty/stale checks, then accumulate + flush (unchanged semantics)
+        for c in to_fetch:
+            description = details.get(c["job_id"], "") or ""
+            if len(description.strip()) < MIN_DESCRIPTION_CHARS:
+                RUN_STATS["empty_detail"] += 1
+                if verbose:
+                    print(f"  [{c['portal']}] → empty detail fetch, skipping: {c['title'][:60]}")
+                update_fit(conn, c["portal"], c["job_id"], "No Fit",
+                           "Detail fetch returned empty — listing likely removed/expired.")
+                continue
+            if is_stale(description, c["portal"]):
+                RUN_STATS["stale"] += 1
+                if verbose:
+                    print(f"  [{c['portal']}] → stale (>48h), skipping: {c['title'][:60]}")
+                update_fit(conn, c["portal"], c["job_id"], "No Fit", "Stale listing (posted >48h ago).")
+                continue
+            pending.append({"portal": c["portal"], "job_id": c["job_id"], "title": c["title"],
+                            "company": c["company"], "url": c.get("url", ""), "description": description})
+            if _should_flush(pending):
+                eval_count, stopped, evaluated, pending = _flush_eval_batch(conn, pending, eval_count, context)
+                if collect_into is not None:
+                    for j in evaluated:
+                        collect_into.append({k: j[k] for k in
+                                             ("portal", "job_id", "title", "company", "url", "fit_rating", "fit_notes")})
+                if stopped:
+                    break
+        if stopped:
+            break
+
+    eval_count, stopped = _drain_pending(conn, pending, eval_count, stopped,
+                                         f"{context} (final partial batch)", collect_into=collect_into)
+    if eval_count >= MAX_EVALUATIONS and i < n:
+        print(f"\n[limit] MAX_EVALUATIONS={MAX_EVALUATIONS} reached — remaining listings stay "
+              f"unevaluated until the next pass")
+        RUN_STATS["cap_hit"] = True
+    return eval_count, stopped
+
+
 def _finish_run(conn: sqlite3.Connection, mode: str, run_count: int, stopped_for_memory: bool) -> None:
     """
     Shared tail for both the --redo-unknown and normal scan+evaluate code
@@ -2018,47 +2146,22 @@ def main() -> None:
             _rscores = _relevance_scores_for([r[2] or "" for r in rows])
             rows = [r for _, r in sorted(zip(_rscores, rows), key=lambda p: p[0], reverse=True)]
         print(f"\n[redo] {len(rows)} Unknown/unevaluated jobs (all dates) to re-evaluate")
-        stopped_for_memory = False
-        pending: list[dict] = []
+        candidates: list[dict] = []
         for portal_name, job_id, title, company, url in rows:
-            if (eval_count + len(pending)) >= MAX_EVALUATIONS:
-                print(f"\n[limit] MAX_EVALUATIONS={MAX_EVALUATIONS} reached in redo pass")
-                RUN_STATS["cap_hit"] = True
-                break
             portal_cfg = portal_by_name.get(portal_name)
             if not portal_cfg:
-                print(f"  [redo] unknown portal '{portal_name}', skipping")
-                continue
-            existing = find_existing_rating(conn, title or "", company or "", portal_name, job_id)
-            if existing:
-                rating, notes = existing
-                update_fit(conn, portal_name, job_id, rating,
-                           f"{notes} (duplicate posting — rating copied from an earlier listing)")
-                continue
-            prefilter = _prefilter_rating(title or "")
-            if prefilter:
-                rating, notes = prefilter
-                RUN_STATS["prefiltered"] += 1
-                update_fit(conn, portal_name, job_id, rating, notes)
-                continue
-            description = fetch_detail(portal_cfg, job_id)
-            if len(description.strip()) < MIN_DESCRIPTION_CHARS:
-                RUN_STATS["empty_detail"] += 1
+                # Portal was disabled/removed since this job was scraped, so there
+                # is no CLI to fetch its detail — it can NEVER be evaluated. Mark
+                # it terminal so it leaves the unevaluated set; otherwise it clogs
+                # the backlog and spins the drain loop until MAX_DRAIN_ROUNDS
+                # (confirmed 2026-10-19: 16 jobfinder-lu/jobs-ch jobs did exactly
+                # this after those portals were disabled).
                 update_fit(conn, portal_name, job_id, "No Fit",
-                           "Detail fetch returned empty — listing likely removed/expired.")
+                           "Portal no longer configured — out of scope, not evaluated.")
                 continue
-            if is_stale(description, portal_name):
-                RUN_STATS["stale"] += 1
-                update_fit(conn, portal_name, job_id, "No Fit", "Stale listing (posted >48h ago).")
-                continue
-            pending.append({"portal": portal_name, "job_id": job_id, "title": title or "",
-                             "company": company or "", "description": description})
-            if _should_flush(pending):
-                eval_count, stopped_for_memory, _, pending = _flush_eval_batch(conn, pending, eval_count, "redo pass")
-                if stopped_for_memory:
-                    break
-        eval_count, stopped_for_memory = _drain_pending(
-            conn, pending, eval_count, stopped_for_memory, "redo pass (final partial batch)")
+            candidates.append({"portal_cfg": portal_cfg, "portal": portal_name, "job_id": job_id,
+                               "title": title or "", "company": company or "", "url": url or ""})
+        eval_count, stopped_for_memory = _evaluate_candidates(conn, candidates, eval_count, "redo pass")
         _finish_run(conn, "redo", eval_count, stopped_for_memory)
         return
 
@@ -2114,74 +2217,26 @@ def main() -> None:
     if populate_only:
         pass  # cache-only mode: skip detail fetch and evaluation entirely
     else:
-        # Pass 2: round-robin SELECT one job per portal per round (unchanged
-        # fairness), but accumulate into `pending` and flush as a batch every
-        # EVAL_BATCH_SIZE jobs instead of calling evaluate_fit per job. A batch
-        # can span jobs from different portals — that's fine, batching is purely
-        # a transport optimisation, each job's own portal travels with it.
-        stopped_for_memory = False
-        pending: list[dict] = []
-        while (eval_count + len(pending)) < MAX_EVALUATIONS and any(queue for _, queue in portal_queues) and not stopped_for_memory:
+        # Pass 2: flatten the per-portal queues into one round-robin-ordered
+        # candidate list (one job per portal per round preserves cross-portal
+        # fairness; each portal's queue is already Groq-relevance-ordered, so the
+        # flattened order is still best-first), then run the shared pipeline,
+        # which fetches each window's descriptions in parallel.
+        candidates: list[dict] = []
+        while any(q for _, q in portal_queues):
             for portal_cfg, queue in portal_queues:
-                if (eval_count + len(pending)) >= MAX_EVALUATIONS:
-                    break
                 if not queue:
                     continue
-                portal_name = portal_cfg["name"]
                 jid = queue.pop(0)
-                r       = found_by_portal[portal_name][jid]
-                title   = r.get("title", "")
-                company = r.get("company", r.get("companyName", r.get("employer", r.get("hiringOrgName", ""))))
-                url     = r.get("url", "")
-
-                existing = find_existing_rating(conn, title, company, portal_name, jid)
-                if existing:
-                    rating, notes = existing
-                    print(f"  [{portal_name}] → duplicate of an already-rated listing, copying: {title[:60]}")
-                    update_fit(conn, portal_name, jid, rating,
-                               f"{notes} (duplicate posting — rating copied from an earlier listing)")
-                    continue
-
-                prefilter = _prefilter_rating(title)
-                if prefilter:
-                    rating, notes = prefilter
-                    RUN_STATS["prefiltered"] += 1
-                    print(f"  [{portal_name}] → pre-filtered, no spawn spent: {title[:60]}")
-                    update_fit(conn, portal_name, jid, rating, notes)
-                    continue
-
-                description = fetch_detail(portal_cfg, jid)
-                if len(description.strip()) < MIN_DESCRIPTION_CHARS:
-                    RUN_STATS["empty_detail"] += 1
-                    print(f"  [{portal_name}] → empty detail fetch, skipping: {title[:60]}")
-                    update_fit(conn, portal_name, jid, "No Fit",
-                               "Detail fetch returned empty — listing likely removed/expired.")
-                    continue
-                if is_stale(description, portal_name):
-                    RUN_STATS["stale"] += 1
-                    print(f"  [{portal_name}] → stale (>48h), skipping: {title[:60]}")
-                    update_fit(conn, portal_name, jid, "No Fit", "Stale listing (posted >48h ago).")
-                    continue
-
-                pending.append({"portal": portal_name, "job_id": jid, "title": title,
-                                 "company": company, "url": url, "description": description})
-
-                if _should_flush(pending):
-                    eval_count, stopped_for_memory, evaluated, pending = _flush_eval_batch(conn, pending, eval_count, "main pass")
-                    for j in evaluated:
-                        new_jobs.append({k: j[k] for k in
-                                          ("portal", "job_id", "title", "company", "url", "fit_rating", "fit_notes")})
-                    if stopped_for_memory:
-                        break
-            if stopped_for_memory:
-                break
-
-        eval_count, stopped_for_memory = _drain_pending(
-            conn, pending, eval_count, stopped_for_memory, "main pass (final partial batch)", collect_into=new_jobs)
-
-        if eval_count >= MAX_EVALUATIONS:
-            print(f"\n[limit] MAX_EVALUATIONS={MAX_EVALUATIONS} reached, remaining listings stay unevaluated until next run")
-            RUN_STATS["cap_hit"] = True
+                r = found_by_portal[portal_cfg["name"]][jid]
+                candidates.append({
+                    "portal_cfg": portal_cfg, "portal": portal_cfg["name"], "job_id": jid,
+                    "title": r.get("title", ""),
+                    "company": r.get("company", r.get("companyName", r.get("employer", r.get("hiringOrgName", "")))),
+                    "url": r.get("url", ""),
+                })
+        eval_count, stopped_for_memory = _evaluate_candidates(
+            conn, candidates, eval_count, "main pass", collect_into=new_jobs, verbose=True)
 
     if populate_only:
         total_cache = cache_size(conn)
