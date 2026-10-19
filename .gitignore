@@ -122,3 +122,8 @@ proposals/*
 claude docs/personalprofilefun.md
 claude docs/internship.md
 claude docs/AUDIT_TEMP.md
+
+# Hook + changelog that embed candidate-specific facts (cert scores, employer,
+# brand, companies applied to) — keep local, not for the public repo.
+scripts/check_cv_oversell.sh
+claude docs/change.md
