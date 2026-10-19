@@ -92,3 +92,33 @@ scripts/candidate_profile.txt
 # Your personal profile — copy from CLAUDE.md.example and run /setup to populate.
 # Never commit this: it ends up containing your name, salary expectations, and full work history.
 CLAUDE.md
+
+# Groq API key for optional semantic relevance ranking in morning_scan.py (#6).
+# Never commit these. The env var GROQ_API_KEY takes precedence if set.
+.env
+.groq_api_key
+
+# ============================================================
+#  Personal / PII — NEVER commit (this is a PUBLIC repo).
+#  Closes gaps found in the 2026-10-19 PII audit: archived CVs, extensionless
+#  cover letters, interview prep (contains third-party recruiter contacts),
+#  outreach/gig/proposal content, tracker backups, certificates, and the
+#  personal freelance/profile scratch docs.
+# ============================================================
+cv/_archive/
+cover_letters/cover_*
+cover_letters/Cover_*
+interview_prep/
+outreach/
+documents/
+*.bak
+upwork_tracker.csv
+job_scraper/upwork_tracker.csv
+gig_postings/*
+!gig_postings/.gitkeep
+proposals/*
+!proposals/.gitkeep
+.claude/skills/upwork-search/freelance-profile.md
+claude docs/personalprofilefun.md
+claude docs/internship.md
+claude docs/AUDIT_TEMP.md

@@ -10,6 +10,7 @@ scripts/daily_digests/YYYY-MM-DD.md.
 """
 
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -18,7 +19,10 @@ import signal
 import subprocess
 import sqlite3
 import sys
+import tempfile
+import threading
 import time
+import urllib.request
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -54,6 +58,82 @@ sys.stderr.reconfigure(line_buffering=True)
 # without this, every claude --print call fails silently (empty stdout, no
 # exception raised) and gets misrecorded as "Unknown" fit instead of erroring.
 os.environ["PATH"] = "/opt/homebrew/bin:" + os.environ.get("PATH", "")
+
+# ============================================================
+#  RUN HEALTH — surface a degraded/incomplete run loudly
+# ============================================================
+# Anything that made this run less than a clean, complete pass gets recorded
+# here and printed as a prominent banner at the end (and summarised into the
+# digest), so a run that "finished" but silently skipped portals, hit the eval
+# cap, got throttled for memory, or dropped jobs is never mistaken for a full
+# healthy scan. Counters are plain ints/lists; _flag_issue() records a
+# human-readable headline problem.
+RUN_STATS: dict = {
+    "prefiltered": 0,       # jobs dropped by the cheap title pre-filter (no spawn spent)
+    "empty_detail": 0,      # detail fetch came back empty (listing removed/expired)
+    "stale": 0,             # listing older than the freshness cutoff
+    "eval_failed": 0,       # claude --print returned an error / Unknown
+    "mem_killed_spawns": 0, # claude --print killed by the per-spawn memory watchdog
+    "portals_zero": [],     # portals that returned zero listings this run
+    "portals_error": [],    # portals whose CLI errored at least once
+    "memory_paused": False, # run stopped early under memory pressure
+    "cap_hit": False,       # MAX_EVALUATIONS reached (listings left unevaluated)
+    "cap_reduced_to": None, # MAX_EVALUATIONS auto-lowered at launch for low RAM
+    "issues": [],           # free-text headline problems
+}
+
+
+def _flag_issue(msg: str) -> None:
+    """Record a headline problem to surface in the end-of-run health banner."""
+    RUN_STATS["issues"].append(msg)
+    print(f"  [ISSUE] {msg}", file=sys.stderr)
+
+
+def _run_health_problems() -> list[str]:
+    """The list of things that made this run less than a clean full pass
+    (empty if none). Shared by the console banner and the digest note."""
+    s = RUN_STATS
+    problems: list[str] = list(s["issues"])
+    if s["cap_reduced_to"] is not None:
+        problems.append(f"eval cap auto-reduced to {s['cap_reduced_to']} (low RAM at launch)")
+    if s["cap_hit"]:
+        problems.append("MAX_EVALUATIONS reached — some listings left unevaluated (run --redo-unknown)")
+    if s["memory_paused"]:
+        problems.append("run paused under memory pressure before finishing (run --redo-unknown)")
+    if s["portals_zero"]:
+        problems.append(f"portals returning ZERO listings: {', '.join(s['portals_zero'])}")
+    if s["portals_error"]:
+        problems.append(f"portals with CLI errors: {', '.join(s['portals_error'])}")
+    if s["mem_killed_spawns"]:
+        problems.append(f"{s['mem_killed_spawns']} evaluation spawn(s) killed by memory watchdog")
+    if s["eval_failed"]:
+        problems.append(f"{s['eval_failed']} evaluation(s) failed/Unknown")
+    return problems
+
+
+def _run_health_counts() -> str:
+    s = RUN_STATS
+    return (f"pre-filtered={s['prefiltered']} empty-detail={s['empty_detail']} "
+            f"stale={s['stale']}")
+
+
+def _print_run_health() -> None:
+    """
+    Print a clear banner describing whether this run was clean or degraded.
+    Always prints something — a clean run says so explicitly, so the absence of
+    a warning is itself a positive signal rather than just missing output.
+    """
+    problems = _run_health_problems()
+    counts = _run_health_counts()
+    if not problems:
+        print(f"\n✅ RUN HEALTH: clean — no issues detected. ({counts})")
+        return
+    print("\n" + "=" * 60)
+    print("⚠️  RUN HEALTH: this run was DEGRADED / incomplete:")
+    for p in problems:
+        print(f"   • {p}")
+    print(f"   ({counts})")
+    print("=" * 60)
 
 def _arg_value(flag: str, default: str) -> str:
     """Read `--flag value` from sys.argv, falling back to `default` if absent."""
@@ -130,6 +210,9 @@ PORTALS = [
             ["search", "--query", "AI engineer",           "--jobage", JOBINDEX_JOBAGE, "--sort", "date", "--format", "json"],
             ["search", "--query", "ML engineer",            "--jobage", JOBINDEX_JOBAGE, "--sort", "date", "--format", "json"],
             ["search", "--query", "machine learning",      "--jobage", JOBINDEX_JOBAGE, "--sort", "date", "--format", "json"],
+            ["search", "--query", "business development analyst", "--jobage", JOBINDEX_JOBAGE, "--sort", "date", "--format", "json"],
+            ["search", "--query", "implementation engineer", "--jobage", JOBINDEX_JOBAGE, "--sort", "date", "--format", "json"],
+            ["search", "--query", "forward deployed data engineer", "--jobage", JOBINDEX_JOBAGE, "--sort", "date", "--format", "json"],
         ],
         "detail": lambda jid: ["detail", jid, "--format", "plain"],
     },
@@ -138,19 +221,27 @@ PORTALS = [
         "cli":  ".claude/skills/jobnet-search/cli/src/cli.ts",
         "id_field": "jobAdId",
         "searches": [
-            # --per-page 10 keeps response small (avoids 65 KB JSON truncation)
-            ["search", "--search-string", "data engineer",         "--since", SINCE_DATE, "--per-page", "10", "--format", "json"],
-            ["search", "--search-string", "analytics engineer",    "--since", SINCE_DATE, "--per-page", "10", "--format", "json"],
-            ["search", "--search-string", "data analyst",          "--since", SINCE_DATE, "--per-page", "10", "--format", "json"],
-            ["search", "--search-string", "data scientist",        "--since", SINCE_DATE, "--per-page", "10", "--format", "json"],
-            ["search", "--search-string", "data consultant",       "--since", SINCE_DATE, "--per-page", "10", "--format", "json"],
-            ["search", "--search-string", "BI developer",          "--since", SINCE_DATE, "--per-page", "10", "--format", "json"],
-            ["search", "--search-string", "BI consultant",         "--since", SINCE_DATE, "--per-page", "10", "--format", "json"],
-            ["search", "--search-string", "Power BI developer",    "--since", SINCE_DATE, "--per-page", "10", "--format", "json"],
-            ["search", "--search-string", "business intelligence", "--since", SINCE_DATE, "--per-page", "10", "--format", "json"],
-            ["search", "--search-string", "AI developer",         "--since", SINCE_DATE, "--per-page", "10", "--format", "json"],
-            ["search", "--search-string", "AI engineer",          "--since", SINCE_DATE, "--per-page", "10", "--format", "json"],
-            ["search", "--search-string", "ML engineer",           "--since", SINCE_DATE, "--per-page", "10", "--format", "json"],
+            # --per-page 50: jobnet's --since is ignored server-side (always returns
+            # the newest N regardless of date), so the only freshness gate is the
+            # post-fetch MAX_AGE_HOURS cutoff. At --per-page 10 that discarded nearly
+            # everything (jobnet surfaced ~1 job/day); 50 gives the cutoff enough
+            # newest-first results to actually catch all recent postings. Verified
+            # ~183 KB JSON parses fine at 50 — no truncation.
+            ["search", "--search-string", "data engineer",         "--since", SINCE_DATE, "--per-page", "50", "--format", "json"],
+            ["search", "--search-string", "analytics engineer",    "--since", SINCE_DATE, "--per-page", "50", "--format", "json"],
+            ["search", "--search-string", "data analyst",          "--since", SINCE_DATE, "--per-page", "50", "--format", "json"],
+            ["search", "--search-string", "data scientist",        "--since", SINCE_DATE, "--per-page", "50", "--format", "json"],
+            ["search", "--search-string", "data consultant",       "--since", SINCE_DATE, "--per-page", "50", "--format", "json"],
+            ["search", "--search-string", "BI developer",          "--since", SINCE_DATE, "--per-page", "50", "--format", "json"],
+            ["search", "--search-string", "BI consultant",         "--since", SINCE_DATE, "--per-page", "50", "--format", "json"],
+            ["search", "--search-string", "Power BI developer",    "--since", SINCE_DATE, "--per-page", "50", "--format", "json"],
+            ["search", "--search-string", "business intelligence", "--since", SINCE_DATE, "--per-page", "50", "--format", "json"],
+            ["search", "--search-string", "AI developer",         "--since", SINCE_DATE, "--per-page", "50", "--format", "json"],
+            ["search", "--search-string", "AI engineer",          "--since", SINCE_DATE, "--per-page", "50", "--format", "json"],
+            ["search", "--search-string", "ML engineer",           "--since", SINCE_DATE, "--per-page", "50", "--format", "json"],
+            ["search", "--search-string", "business development analyst", "--since", SINCE_DATE, "--per-page", "50", "--format", "json"],
+            ["search", "--search-string", "implementation engineer", "--since", SINCE_DATE, "--per-page", "50", "--format", "json"],
+            ["search", "--search-string", "forward deployed data engineer", "--since", SINCE_DATE, "--per-page", "50", "--format", "json"],
         ],
         "detail": lambda jid: ["detail", jid, "--format", "plain"],
     },
@@ -178,6 +269,9 @@ PORTALS = [
             ["search", "--key", "AI developer",          "--location", "8", "--limit", _WIDE_LIMIT, "--format", "json"],
             ["search", "--key", "AI engineer",           "--location", "8", "--limit", _WIDE_LIMIT, "--format", "json"],
             ["search", "--key", "ML engineer",            "--location", "8", "--limit", _WIDE_LIMIT, "--format", "json"],
+            ["search", "--key", "business development analyst", "--location", "8", "--work-area", "43", "--limit", _WIDE_LIMIT, "--format", "json"],
+            ["search", "--key", "implementation engineer", "--location", "8", "--work-area", "43", "--limit", _WIDE_LIMIT, "--format", "json"],
+            ["search", "--key", "forward deployed data engineer", "--location", "8", "--limit", _WIDE_LIMIT, "--format", "json"],
         ],
         "detail": lambda jid: ["detail", jid, "--format", "plain"],
     },
@@ -197,11 +291,15 @@ PORTALS = [
             ["search", "--text", "business intelligence", "--since", SINCE_DATE, "--format", "json"],
             ["search", "--text", "AI engineer",           "--since", SINCE_DATE, "--format", "json"],
             ["search", "--text", "ML engineer",            "--since", SINCE_DATE, "--format", "json"],
+            ["search", "--text", "business development analyst", "--since", SINCE_DATE, "--format", "json"],
+            ["search", "--text", "implementation engineer", "--since", SINCE_DATE, "--format", "json"],
+            ["search", "--text", "forward deployed data engineer", "--since", SINCE_DATE, "--format", "json"],
         ],
         "detail": lambda jid: ["detail", jid, "--format", "plain"],
     },
     {
         "name": "jobfinder-lu",
+        "enabled": False,
         "cli":  ".claude/skills/jobfinder-lu-search/cli/src/cli.ts",
         "id_field": "id",
         "searches": [
@@ -216,6 +314,8 @@ PORTALS = [
             ["search", "--query", "business intelligence", "--since", SINCE_DATE, "--format", "json"],
             ["search", "--query", "AI engineer",           "--since", SINCE_DATE, "--format", "json"],
             ["search", "--query", "ML engineer",            "--since", SINCE_DATE, "--format", "json"],
+            ["search", "--query", "business development analyst", "--since", SINCE_DATE, "--format", "json"],
+            ["search", "--query", "implementation engineer", "--since", SINCE_DATE, "--format", "json"],
             # Category browse (IT; Banking & Finance) — the free-text --query above only
             # matches literal English phrases against title/description, which misses
             # French/German-titled postings and returns near-zero hits for compound
@@ -229,6 +329,7 @@ PORTALS = [
     },
     {
         "name": "jobs-ch",
+        "enabled": False,
         "cli":  ".claude/skills/jobs-ch-search/cli/src/cli.ts",
         "id_field": "id",
         "searches": [
@@ -241,12 +342,16 @@ PORTALS = [
             ["search", "--term", "Power BI developer",    "--region", "central-switzerland", "--limit", _WIDE_LIMIT, "--format", "json"],
             ["search", "--term", "business intelligence", "--region", "central-switzerland", "--limit", _WIDE_LIMIT, "--format", "json"],
             ["search", "--term", "ML engineer",            "--region", "central-switzerland", "--limit", _WIDE_LIMIT, "--format", "json"],
+            ["search", "--term", "business development analyst", "--region", "central-switzerland", "--limit", _WIDE_LIMIT, "--format", "json"],
+            ["search", "--term", "implementation engineer", "--region", "central-switzerland", "--limit", _WIDE_LIMIT, "--format", "json"],
             # Zürich (no canton filter available on jobs.ch; include city in term)
             ["search", "--term", "data engineer zürich",         "--limit", _WIDE_LIMIT, "--format", "json"],
             ["search", "--term", "analytics engineer zürich",    "--limit", _WIDE_LIMIT, "--format", "json"],
             ["search", "--term", "data analyst zürich",          "--limit", _WIDE_LIMIT, "--format", "json"],
             ["search", "--term", "data scientist zürich",        "--limit", _WIDE_LIMIT, "--format", "json"],
             ["search", "--term", "business intelligence zürich", "--limit", _WIDE_LIMIT, "--format", "json"],
+            ["search", "--term", "business development analyst zürich", "--limit", _WIDE_LIMIT, "--format", "json"],
+            ["search", "--term", "implementation engineer zürich", "--limit", _WIDE_LIMIT, "--format", "json"],
         ],
         "detail": lambda jid: ["detail", jid, "--format", "plain"],
     },
@@ -320,7 +425,25 @@ if _portal_filter_raw:
 # (150) sequential spawns, is what actually drove the recurring memory-pressure
 # aborts, not concurrency. Batching cuts spawn count (and therefore that
 # cumulative overhead) by ~EVAL_BATCH_SIZE times.
-EVAL_BATCH_SIZE = 5
+#
+# NOTE on "reuse one long-lived process": the real fix for the per-spawn 400MB
+# would be a single persistent model process fed many prompts. The `claude
+# --print` CLI is one-shot by design (it exits after one prompt), and the only
+# persistent-process alternative is the Agent SDK / HTTP API — which would move
+# this off the Claude Code subscription auth onto metered API billing. So the
+# in-CLI equivalent is to maximise jobs-per-spawn: at 10, a 150-job run makes
+# ~15 spawns instead of ~30, halving the cumulative memory churn. Haiku's
+# context has ample headroom for 10 × MAX_DESCRIPTION_CHARS. Kept at 10 rather
+# than higher because very large batches make the model more likely to mis-number
+# or drop a job's block (those fall through to Unknown and get redone next run,
+# but that wastes the spawn) — 10 is the reliability/efficiency sweet spot.
+EVAL_BATCH_SIZE = 10
+# #7: when RAM is genuinely plentiful, grow the batch toward this ceiling so the
+# fixed ~400MB spawn cost is amortised across more jobs (fewer spawns clear the
+# same backlog). Capped below a size where the model starts mis-numbering or
+# dropping job blocks (those fall through to Unknown and get redone, wasting the
+# spawn). Only engages below MEM_PLENTY_THRESHOLD.
+EVAL_BATCH_SIZE_MAX = 15
 
 # A job whose detail-fetch came back empty or near-empty (removed listing,
 # dead job_id, portal CLI error) must never enter a batch: caught via a real
@@ -341,6 +464,13 @@ MIN_DESCRIPTION_CHARS = 30
 # even for a batch of 5 at this size — there was never a real reason for the
 # limit to be this tight. Raised with margin over the real case that broke it.
 MAX_DESCRIPTION_CHARS = 8000
+
+# Per-spawn RAM ceiling for a single `claude --print` evaluation. One spawn is
+# normally ~400MB; a batch rarely tops ~800MB. 1800MB leaves generous room for a
+# legitimately large batch while still killing a genuinely runaway spawn long
+# before it can drag the whole machine into swap. A killed spawn's jobs fall
+# through to Unknown and are picked up by the next --redo-unknown pass.
+CLAUDE_SPAWN_MEM_CEILING_MB = 1800
 
 def _load_candidate_profile() -> str:
     """
@@ -385,6 +515,285 @@ Description:
 {description}
 """
 
+# Fingerprint of the exact evaluation logic (candidate profile + prompt
+# templates) a rating was produced under. A "duplicate posting" cache-copy
+# (find_existing_rating) must only pull ratings stamped with the CURRENT
+# version — otherwise a bug fix or profile edit (e.g. tightening the
+# incomplete-description rule) never reaches postings whose rating was
+# already cached under the old, buggier logic, since the copy path skips
+# re-evaluation entirely. Confirmed on real data: a "Product Owner &
+# Analytics Engineer" posting was rated Strong Fit on 2026-07-06 — before
+# the incomplete-description safeguard existed — then silently copied
+# forward via the duplicate-match path on 2026-08-27 without ever being
+# re-evaluated, even though the underlying prompt had since been fixed.
+# Any change to CANDIDATE_PROFILE or these templates changes this hash,
+# which makes every previously-cached rating ineligible for copying until
+# it's been re-evaluated under the new logic at least once.
+EVAL_VERSION = hashlib.sha256(
+    (CANDIDATE_PROFILE + FIT_PROMPT_BATCH_TEMPLATE + FIT_PROMPT_JOB_BLOCK).encode("utf-8")
+).hexdigest()[:12]
+
+# ============================================================
+#  CHEAP PRE-FILTER (title-only; no model spawn)
+# ============================================================
+# Most scraped listings are obvious non-fits by title alone (kitchen assistant,
+# pædagog, svejser, Senior/Head-of roles). Dropping those here — before a
+# detail-fetch AND before a ~400MB claude --print spawn — is the single biggest
+# lever on how much memory work a run does.
+#
+# DELIBERATELY HIGH-PRECISION. A wrong exclusion hides a real job (costly); a
+# missed exclusion just wastes one spawn (cheap). So: (1) every pre-filtered job
+# is still recorded as No Fit and listed in the digest's Excluded section —
+# nothing vanishes silently; (2) any data/BI/AI/engineering term ANYWHERE in the
+# title cancels the profession filter (a "Data Analyst, Lager & Logistik" is
+# never dropped for containing "lager"); (3) the profession list is specific
+# role-nouns, not broad stems. "Intern"/"Trainee"/"Student" are intentionally
+# NOT pre-filtered — graduate-open internships are in scope (e.g. the Kamstrup
+# Data Analyst Intern), so those nuanced cases are left to the model.
+_PREFILTER_RESCUE_RE = re.compile(
+    r"\b(data|analytics?|analyse|analytiker|business intelligence|bi|power\s?bi|"
+    r"machine learning|ml|ai|artificial intelligence|developer|udvikler|engineer|"
+    r"scientist|software|python|sql|etl|pipeline|consultant|konsulent|rapportering)\b",
+    re.IGNORECASE,
+)
+_PREFILTER_PROFESSION_RE = re.compile(
+    r"\b("
+    r"sygeplejerske|sosu|social[- ]?og[- ]?sundhed|pædagog\w*|lærer\w*|underviser|"
+    r"lektor|adjunkt|professor|postdoc|ph\.?d\.?[- ]?(?:stipendiat|studerende|scholarship)|"
+    r"kok|køkken\w*|tjener|kantine|bartender|barista|svejser|smed|tømrer|snedker|murer|"
+    r"maler|elektriker|vvs|mekaniker|montør|chauffør\w*|lastbil\w*|lagermedarbejder|"
+    r"warehouse (?:operative|worker|assistant)|rengøring\w*|cleaner|housekeeper|stuepige|"
+    r"frisør|kosmetolog|pedel|ejendomsservice|dyrlæge|veterinarian|farmaceut|farmakonom|"
+    r"jordemoder|fysioterapeut|ergoterapeut|tandlæge|tandplejer|læge|overlæge|reservelæge|"
+    r"sygehjælper|portør|auktionsmægler|ejendomsmægler|dredger|kabinepersonale|flyttemand|"
+    r"kitchen (?:assistant|porter)|chef de partie"
+    r")\b",
+    re.IGNORECASE,
+)
+_PREFILTER_SENIORITY_RE = re.compile(
+    r"^\s*(senior|sr\.?|lead|principal|head of|chief|vp|director|direktør|"
+    r"afdelingsleder|afdelingschef)\b",
+    re.IGNORECASE,
+)
+
+
+def _prefilter_rating(title: str) -> tuple[str, str] | None:
+    """Return ('No Fit', reason) if the title is an unambiguous non-fit that
+    needn't cost a detail-fetch + claude spawn, else None. See notes above."""
+    t = (title or "").strip()
+    if not t:
+        return None
+    m = _PREFILTER_SENIORITY_RE.match(t)
+    if m:
+        return ("No Fit",
+                f"Pre-filtered: senior-tier title ('{m.group(1)}') — candidate is junior (hard-no).")
+    m = _PREFILTER_PROFESSION_RE.search(t)
+    if m and not _PREFILTER_RESCUE_RE.search(t):
+        return ("No Fit",
+                f"Pre-filtered: non-data profession ('{m.group(1)}'), no data/BI/AI term in title.")
+    return None
+
+
+# #6 cheap relevance pre-score: order the evaluation queue best-first so that
+# whatever gets evaluated in a partial/early window is the MOST relevant subset,
+# not a round-robin that spends the first spawns on "Team Lead for Support". It
+# is ordering ONLY — never a drop. Dropping on title alone is unsafe (a real fit
+# may not spell a keyword in its title), and loop-to-completion (#3) evaluates
+# everything regardless, so ordering captures the benefit with none of the
+# false-negative risk.
+_RELEVANCE_TERMS = re.compile(
+    r"\b(data|analytics?|analyse|analytik\w*|business intelligence|bi|power\s?bi|"
+    r"machine learning|ml|ai|artificial intelligence|scientist|engineer|udvikler|"
+    r"developer|software|sql|etl|elt|pipeline|warehouse|lakehouse|fabric|azure|"
+    r"databricks|snowflake|dbt|bigquery|automation|automatiser\w*|llm|rag|agent\w*|"
+    r"mcp|consultant|konsulent|rapporter\w*|dashboard|visualis\w*|forecast\w*|"
+    r"python|model\w*|integration)\b",
+    re.IGNORECASE,
+)
+
+
+def _relevance_score(title: str, company: str = "") -> int:
+    """Number of distinct domain terms the title hits. The cheap, dependency-free
+    fallback ranker, and the tiebreaker within equal Groq scores below."""
+    return len({m.group(0).lower() for m in _RELEVANCE_TERMS.finditer(title or "")})
+
+
+# --- #6 upgrade: optional Groq semantic relevance ranking ---------------------
+# With a Groq API key available, rank titles with a cheap, fast Llama call rather
+# than the keyword count above — a far better sort signal (it understands that
+# "Forretningsudvikler der elsker tal" is data-adjacent with no keyword match).
+# Still ORDERING ONLY, never a drop. Fail-safe by construction: no key, a bad
+# model name, or any network/parse error silently falls back to the keyword
+# score, so the open-source default (no key set) and offline runs behave exactly
+# as before. No new pip dependency — this uses stdlib urllib against Groq's
+# OpenAI-compatible endpoint.
+def _load_groq_key() -> str:
+    k = os.environ.get("GROQ_API_KEY", "").strip()
+    if k:
+        return k
+    # launchd runs this with a minimal env, so also accept the key from a local,
+    # git-ignored file. Two forms:
+    #   - .env           : a line  GROQ_API_KEY=gsk_...   (standard dotenv)
+    #   - .groq_api_key  : just the raw key on its own line
+    for p in (BASE_DIR / ".env", SCRIPTS / ".env"):
+        try:
+            if not p.exists():
+                continue
+            for line in p.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line.startswith("export "):
+                    line = line[len("export "):].strip()
+                if line.startswith("GROQ_API_KEY") and "=" in line:
+                    v = line.split("=", 1)[1].strip().strip('"').strip("'")
+                    if v:
+                        return v
+        except Exception:
+            pass
+    for p in (SCRIPTS / ".groq_api_key", BASE_DIR / ".groq_api_key"):
+        try:
+            if p.exists():
+                return p.read_text(encoding="utf-8").strip()
+        except Exception:
+            pass
+    return ""
+
+
+GROQ_API_KEY    = _load_groq_key()
+# gpt-oss-120b gives clean, well-graded 0-10 scores on this task; the smaller
+# gpt-oss-20b returned unparseable output in testing. Override via
+# GROQ_RELEVANCE_MODEL if your account exposes different models (list them with
+# GET https://api.groq.com/openai/v1/models).
+GROQ_MODEL      = os.environ.get("GROQ_RELEVANCE_MODEL", "openai/gpt-oss-120b")
+GROQ_RANK_BATCH = 40  # titles per Groq call
+
+# Profile + rubric tuned via scripts/../scratchpad prompt-engineering tests
+# (variant "C_graded" won on a labeled set: 1 mismatch vs 2-3 for alternatives).
+# The graded 0-3 / 4-7 / 8-10 banding is deliberate: the middle band is where
+# genuinely title-ambiguous roles belong (a generic "Business Analyst", or an
+# "Intern"/"Student" data role whose title doesn't reveal whether it needs
+# current student enrolment) — scoring those ~5 keeps them mid-queue rather than
+# buried at 0 or falsely boosted to 10, and the full claude --print evaluation
+# (which DOES read the description) then resolves the real fit.
+# Generic default — intentionally carries NO user specifics, since this file is a
+# public, shared script. Personalise it by putting a single line in your
+# (git-ignored) candidate_profile.txt:  RELEVANCE_PROFILE: <one-line description>
+# — if present it is used verbatim; otherwise this generic data-roles framing is.
+_DEFAULT_RELEVANCE_PROFILE = (
+    "A candidate targeting data roles. Fit = roles whose CORE work is data engineering, "
+    "BI, analytics, data analyst/scientist, AI/ML/LLM, automation, or software for data "
+    "(Python/SQL/cloud). Judge by the core function, not the department or team name."
+)
+
+
+def _load_relevance_profile() -> str:
+    try:
+        for line in CANDIDATE_PROFILE.splitlines():
+            if line.strip().upper().startswith("RELEVANCE_PROFILE:"):
+                v = line.split(":", 1)[1].strip()
+                if v:
+                    return v
+    except Exception:
+        pass
+    return _DEFAULT_RELEVANCE_PROFILE
+
+
+_RELEVANCE_PROFILE = _load_relevance_profile()
+
+_GROQ_RANK_PROMPT = """\
+You rank job-posting titles by fit for ONE candidate. Candidate: {profile}
+
+Score each title 0-10:
+- 8-10: core data/BI/AI/analytics/data-engineering role, INCLUDING junior/graduate level.
+- 4-7: genuinely AMBIGUOUS from the title alone — reserve this for cases you cannot resolve \
+without the full job description, e.g. a generic "Business Analyst", or an "Intern"/"Student" \
+data role where the title does not reveal whether it requires current student enrolment.
+- 0-3: clearly a different field (healthcare, teaching, trades, kitchen, logistics, pure \
+sales/marketing/HR/accounting), OR a senior/lead/head/principal/director title.
+Examples: "Data Engineer" -> 9; "Senior Data Analyst" -> 2; "Data Analyst Intern" -> 5; \
+"Business Analyst" -> 5; "Sygeplejerske" -> 0; "Studentermedhjælper, data" -> 4.
+
+For each numbered title below, output exactly one line "N: S". Output ONLY those lines.
+
+{titles}"""
+
+
+def _groq_chat(prompt: str, timeout: int = 30) -> str:
+    payload = {
+        "model": GROQ_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0,
+        "max_tokens": 1200,
+    }
+    # gpt-oss models emit hidden reasoning tokens that otherwise ~double the
+    # output cost (and can crowd out the answer at a full 40-title batch).
+    # 'low' keeps scoring quality while cutting completion tokens ~40%. Guarded
+    # to gpt-oss so a non-reasoning model override doesn't get rejected.
+    if "gpt-oss" in GROQ_MODEL:
+        payload["reasoning_effort"] = "low"
+    body = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        "https://api.groq.com/openai/v1/chat/completions",
+        data=body,
+        # A non-default User-Agent is REQUIRED: Groq sits behind Cloudflare, which
+        # blocks the stock "Python-urllib/*" UA with a 403 (error 1010).
+        headers={"Authorization": f"Bearer {GROQ_API_KEY}",
+                 "Content-Type": "application/json",
+                 "User-Agent": "morning-scan-relevance/1.0"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    return data["choices"][0]["message"]["content"]
+
+
+def _groq_relevance_scores(titles: list[str]) -> list[int] | None:
+    """0-10 relevance score per title via Groq, batched GROQ_RANK_BATCH at a time.
+    Per-chunk fallback to the keyword score on any error, so one failed chunk
+    never loses the rest. Returns None only if Groq produced nothing for every
+    chunk (caller then uses the pure keyword path)."""
+    scores: list[int | None] = [None] * len(titles)
+    used_groq = False
+    for start in range(0, len(titles), GROQ_RANK_BATCH):
+        chunk = titles[start:start + GROQ_RANK_BATCH]
+        numbered = "\n".join(f"{i + 1}. {(t or '')[:160]}" for i, t in enumerate(chunk))
+        out = None
+        for attempt in range(2):  # one retry rides out a transient Groq hiccup
+            try:
+                out = _groq_chat(_GROQ_RANK_PROMPT.format(profile=_RELEVANCE_PROFILE, titles=numbered))
+                break
+            except Exception as e:
+                if attempt == 0:
+                    time.sleep(1.0)
+                    continue
+                print(f"  [relevance] Groq chunk failed ({e}); keyword fallback for "
+                      f"{len(chunk)} titles", file=sys.stderr)
+        if out is None:
+            for i in range(len(chunk)):
+                scores[start + i] = min(10, _relevance_score(chunk[i]))
+            continue
+        parsed: dict[int, int] = {}
+        for line in out.splitlines():
+            m = re.match(r"\s*(\d+)\s*[:.\)]\s*(\d+)", line)
+            if m:
+                parsed[int(m.group(1))] = max(0, min(10, int(m.group(2))))
+        for i in range(len(chunk)):
+            scores[start + i] = parsed.get(i + 1, min(10, _relevance_score(chunk[i])))
+        used_groq = used_groq or bool(parsed)
+    return scores if used_groq else None  # type: ignore[return-value]
+
+
+def _relevance_scores_for(titles: list[str]) -> list[float]:
+    """Relevance score per title for ordering the eval queue best-first.
+    Prefers Groq semantic ranking when a key is configured; otherwise, or on a
+    total Groq failure, uses the keyword count. Ordering only, never drops."""
+    if GROQ_API_KEY and titles:
+        g = _groq_relevance_scores(titles)
+        if g is not None:
+            # scale Groq (0-10) above the keyword count, with the keyword as a
+            # small stable tiebreaker inside equal Groq scores
+            return [g[i] * 10 + _relevance_score(titles[i]) for i in range(len(titles))]
+    return [float(_relevance_score(t)) for t in titles]
+
 # ============================================================
 #  DATABASE
 # ============================================================
@@ -400,10 +809,19 @@ def init_db(conn: sqlite3.Connection) -> None:
             first_seen   TEXT NOT NULL,
             fit_rating   TEXT,
             fit_notes    TEXT,
+            eval_version TEXT,
             status       TEXT DEFAULT 'new',
             PRIMARY KEY (portal, job_id)
         )
     """)
+    # Additive migration for pre-existing local DBs (this repo is open-source;
+    # other users' seen_jobs.db predates this column). CREATE TABLE above only
+    # applies to a brand-new DB, so anyone with an existing file needs this
+    # ALTER TABLE to actually get the column added.
+    try:
+        conn.execute("ALTER TABLE seen_jobs ADD COLUMN eval_version TEXT")
+    except sqlite3.OperationalError:
+        pass  # column already present
     conn.commit()
 
 
@@ -425,10 +843,10 @@ def mark_seen(conn: sqlite3.Connection, portal: str, job_id: str,
 
 
 def update_fit(conn: sqlite3.Connection, portal: str, job_id: str,
-               rating: str, notes: str) -> None:
+               rating: str, notes: str, eval_version: str = EVAL_VERSION) -> None:
     conn.execute(
-        "UPDATE seen_jobs SET fit_rating=?, fit_notes=? WHERE portal=? AND job_id=?",
-        (rating, notes, portal, str(job_id))
+        "UPDATE seen_jobs SET fit_rating=?, fit_notes=?, eval_version=? WHERE portal=? AND job_id=?",
+        (rating, notes, eval_version, portal, str(job_id))
     )
     conn.commit()
 
@@ -460,15 +878,25 @@ def find_existing_rating(conn: sqlite3.Connection, title: str, company: str,
     instead of spending a fetch_detail + evaluate_fit_batch call re-deciding
     something already decided. Returns (rating, notes) to copy, or None if
     this is genuinely unseen.
+
+    Only matches ratings stamped with the CURRENT EVAL_VERSION. Confirmed on
+    real data: a posting rated Strong Fit on 2026-07-06 (before the
+    incomplete-description safeguard existed in the prompt) was still being
+    silently copied forward on 2026-08-27, weeks after that prompt bug was
+    fixed, because the copy path never re-checked the rating against the
+    newer logic. Gating on version means a stale rating just falls through
+    to a real re-evaluation next time it's encountered, instead of
+    propagating a decision made under outdated logic indefinitely.
     """
     if company in _DUPLICATE_MATCH_EXCLUDED_COMPANIES:
         return None
     row = conn.execute(
         "SELECT fit_rating, fit_notes FROM seen_jobs "
         "WHERE title = ? AND company = ? AND fit_rating NOT IN ('', 'Unknown') "
-        "AND fit_rating IS NOT NULL AND NOT (portal = ? AND job_id = ?) "
+        "AND fit_rating IS NOT NULL AND eval_version = ? "
+        "AND NOT (portal = ? AND job_id = ?) "
         "LIMIT 1",
-        (title, company, exclude_portal, str(exclude_job_id)),
+        (title, company, EVAL_VERSION, exclude_portal, str(exclude_job_id)),
     ).fetchone()
     return (row[0], row[1]) if row else None
 
@@ -509,8 +937,32 @@ def _extract_results_from_text(text: str) -> list[dict]:
     return []
 
 
+class SpawnMemoryKilled(Exception):
+    """Raised when a child spawn was killed for exceeding its RAM ceiling."""
+
+
+def _pgroup_rss_mb(pid: int) -> float:
+    """Total resident memory (MB) of a process group — the spawned process plus
+    every descendant (claude is Node and forks children). Best-effort; returns
+    0.0 if it can't be read so the watchdog never kills on a bad reading."""
+    try:
+        pgid = os.getpgid(pid)
+        out = subprocess.run(["ps", "-o", "pgid=,rss=", "-A"],
+                             capture_output=True, text=True, timeout=5).stdout
+        total_kb = 0
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) >= 2 and parts[0].isdigit() and int(parts[0]) == pgid:
+                total_kb += int(parts[1])
+        return total_kb / 1024.0
+    except Exception:
+        return 0.0
+
+
 def _run_with_group_kill(cmd: list[str], *, input: str | None = None,
-                          cwd: str | None = None, timeout: int = 60) -> subprocess.CompletedProcess:
+                          cwd: str | None = None, timeout: int = 60,
+                          mem_ceiling_mb: float | None = None,
+                          stdout_to_file: bool = False) -> subprocess.CompletedProcess:
     """
     Like subprocess.run(), but on timeout kills the whole process group,
     not just the direct child. Plain subprocess.run(timeout=...) only kills
@@ -521,13 +973,52 @@ def _run_with_group_kill(cmd: list[str], *, input: str | None = None,
     timeout, that accumulates real memory pressure with nothing left to
     account for it. start_new_session=True puts the child in its own
     process group so killpg reaches every descendant at once.
+
+    If mem_ceiling_mb is set, a lightweight watchdog thread polls the whole
+    process group's RSS every few seconds and kills it the moment it exceeds
+    the ceiling, raising SpawnMemoryKilled — a bounded blast radius for a
+    single runaway spawn, so one bad evaluation can't balloon the machine.
+
+    stdout_to_file routes the child's stdout to a real temp file instead of a
+    pipe. This is REQUIRED for the Node portal CLIs: Node's process.stdout to a
+    PIPE is async and only the ~64KB pipe buffer is guaranteed flushed before
+    the process exits, so a large JSON payload (jobnet emits ~183KB) is
+    silently truncated to exactly 65536 bytes — which then fails json.loads and
+    forced the lossy salvage path, capping jobnet to a handful of jobs no matter
+    the --per-page. Writing to a file fd is synchronous, so the full payload
+    always lands. (Confirmed 2026-10-19: same command → 65536 B via pipe vs
+    183991 B via file.)
     """
+    out_f = None
+    out_path = None
+    if stdout_to_file:
+        fd, out_path = tempfile.mkstemp(suffix=".out", prefix="portal_", dir=str(SCRIPTS))
+        out_f = os.fdopen(fd, "w")
+
     proc = subprocess.Popen(
         cmd, cwd=cwd,
         stdin=subprocess.PIPE if input is not None else None,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        stdout=(out_f if stdout_to_file else subprocess.PIPE),
+        stderr=subprocess.PIPE,
         text=True, start_new_session=True,
     )
+
+    stop_watch = threading.Event()
+    mem_killed = {"hit": False}
+    if mem_ceiling_mb:
+        def _watch() -> None:
+            # Poll until the process exits or blows the ceiling. stop_watch is
+            # set in the finally below, so this thread never outlives the call.
+            while not stop_watch.wait(3.0):
+                if _pgroup_rss_mb(proc.pid) > mem_ceiling_mb:
+                    mem_killed["hit"] = True
+                    try:
+                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    return
+        threading.Thread(target=_watch, daemon=True).start()
+
     try:
         stdout, stderr = proc.communicate(input=input, timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -536,7 +1027,25 @@ def _run_with_group_kill(cmd: list[str], *, input: str | None = None,
         except ProcessLookupError:
             pass  # process group already gone
         proc.communicate()  # reap the killed process, avoid a zombie
+        if out_f is not None:
+            out_f.close()
+            try: os.unlink(out_path)
+            except OSError: pass
         raise
+    finally:
+        stop_watch.set()
+
+    if out_f is not None:
+        out_f.close()
+        try:
+            stdout = Path(out_path).read_text(encoding="utf-8", errors="replace")
+        finally:
+            try: os.unlink(out_path)
+            except OSError: pass
+
+    if mem_killed["hit"]:
+        raise SpawnMemoryKilled(
+            f"spawn exceeded {mem_ceiling_mb:.0f}MB RSS ceiling — killed to protect the machine")
     return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
 
 
@@ -637,56 +1146,109 @@ def _report_previous_run_if_crashed() -> None:
     )
 
 
-def _swap_usage_fraction() -> float | None:
-    """Return current swap-used / swap-total as a fraction, or None if unavailable."""
+# Swap kept only as a hard safety backstop. The danger that can actually
+# destabilise the machine is running out of *physical RAM* with no room left to
+# page — which is captured by free swap in absolute MB, NOT by swap-used/total%.
+# Confirmed 2026-10-19: swap sat at 95% (stale pages from an unrelated process,
+# Docker, that had already exited) while 35% of RAM was genuinely free — the old
+# swap-% gate aborted a run that had ample headroom. This backstop only bites
+# when free swap is genuinely tiny: >= SWAP_SAFE_FREE_MB free -> 0 badness,
+# 0 MB free -> 1.0, linear between.
+SWAP_SAFE_FREE_MB = 1024.0
+
+
+def _swap_backstop_fraction() -> float | None:
+    """Badness (0..1, higher=worse) from ABSOLUTE free swap, not swap-used%.
+    ~0 under normal conditions; only climbs when free swap nears exhaustion."""
     try:
         out = subprocess.run(
             ["sysctl", "vm.swapusage"], capture_output=True, text=True, timeout=5
         ).stdout
-        # vm.swapusage: total = 3072.00M  used = 1987.25M  free = 1084.75M  (encrypted)
-        m = re.search(r"total = ([\d.]+)M\s+used = ([\d.]+)M", out)
+        m = re.search(r"free = ([\d.]+)M", out)
         if not m:
             return None
-        total, used = float(m.group(1)), float(m.group(2))
-        return used / total if total > 0 else None
+        free_mb = float(m.group(1))
+        if free_mb >= SWAP_SAFE_FREE_MB:
+            return 0.0
+        return max(0.0, 1.0 - free_mb / SWAP_SAFE_FREE_MB)
     except Exception:
         return None
 
 
-# Tiered response to swap pressure: shrink the unit of work (batch size)
-# before ever fully stopping. A full pause used to trigger at 85% swap with
-# nothing in between "normal" and "stopped" — which meant ordinary background
-# load (other apps, other Claude sessions) could halt the whole pipeline even
-# though there was still real, safe headroom for smaller steps. Real pause is
-# now reserved for genuinely critical pressure, not merely elevated pressure.
-SWAP_COMFORTABLE_THRESHOLD = 0.75  # below this: full EVAL_BATCH_SIZE
-SWAP_ELEVATED_THRESHOLD    = 0.85  # below this: half batch size
-SWAP_CRITICAL_THRESHOLD    = 0.95  # below this: batch size 1 (minimal footprint,
+def _ram_badness_fraction() -> float | None:
+    """Badness (0..1, higher=worse) from genuinely-available physical RAM.
+    available = free + inactive + speculative + purgeable pages (all reclaimable
+    by the kernel on demand); badness = 1 - available/total. This is the PRIMARY
+    memory signal — it reflects real headroom the way swap-% does not."""
+    try:
+        total = int(subprocess.run(
+            ["sysctl", "-n", "hw.memsize"], capture_output=True, text=True, timeout=5
+        ).stdout.strip())
+        out = subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=5).stdout
+        psize_m = re.search(r"page size of (\d+) bytes", out)
+        psize = int(psize_m.group(1)) if psize_m else 4096
+        def pages(name: str) -> int:
+            m = re.search(rf"{re.escape(name)}:\s+(\d+)\.", out)
+            return int(m.group(1)) if m else 0
+        available = (pages("Pages free") + pages("Pages inactive")
+                     + pages("Pages speculative") + pages("Pages purgeable")) * psize
+        return max(0.0, 1.0 - available / total) if total > 0 else None
+    except Exception:
+        return None
+
+
+def _memory_badness_fraction() -> float | None:
+    """Unified memory-pressure signal (0..1, higher=worse). Driven primarily by
+    available physical RAM, with the absolute-free-swap backstop able to escalate
+    it toward critical only on genuine swap exhaustion. Returns None (fail-open)
+    if neither sub-signal can be read."""
+    ram = _ram_badness_fraction()
+    swap = _swap_backstop_fraction()
+    vals = [v for v in (ram, swap) if v is not None]
+    return max(vals) if vals else None
+
+
+# Tiered response to memory pressure: shrink the unit of work (batch size)
+# before ever fully stopping. A full pause used to trigger far too eagerly with
+# nothing in between "normal" and "stopped" — ordinary background load (other
+# apps, other Claude sessions) could halt the whole pipeline even though there
+# was still real, safe headroom for smaller steps. Real pause is now reserved
+# for genuinely critical pressure. Thresholds are on _memory_badness_fraction,
+# so e.g. MEM_COMFORTABLE_THRESHOLD=0.75 means "proceed at full batch while at
+# least ~25% of RAM is reclaimable".
+MEM_PLENTY_THRESHOLD      = 0.60  # below this (>=40% RAM reclaimable): grow batch (#7)
+MEM_COMFORTABLE_THRESHOLD = 0.75  # below this: full EVAL_BATCH_SIZE
+MEM_ELEVATED_THRESHOLD    = 0.85  # below this: half batch size
+MEM_CRITICAL_THRESHOLD    = 0.95  # below this: batch size 1 (minimal footprint,
                                     # still makes forward progress); at/above
                                     # this, even one more ~400MB spawn is a real
-                                    # risk (established: near-total swap
-                                    # exhaustion on this machine risks kernel-
-                                    # level instability) — only here do we abort.
-SWAP_ABORT_THRESHOLD = SWAP_CRITICAL_THRESHOLD
+                                    # risk (near-total memory exhaustion risks
+                                    # kernel-level instability) — only here abort.
+MEM_ABORT_THRESHOLD = MEM_CRITICAL_THRESHOLD
 
 
 def _adaptive_batch_size(ceiling: int) -> int:
     """
-    How many jobs is it safe to send to claude --print in one call right now?
-    Scales down as swap pressure rises instead of the pipeline just stopping —
-    the actual lever a batch pipeline has against memory pressure is how much
-    work it attempts per step, not how long it waits. Returns 0 only when
-    swap is critical enough that even a single evaluation is unsafe; the
-    caller falls back to the retry-then-abort path in that case.
+    How many jobs to send to claude --print in one call right now. Re-evaluated
+    on every flush (#5), so it tracks memory that appears OR frees up mid-run —
+    not a one-time launch decision:
+      - plenty of RAM free      -> grow to EVAL_BATCH_SIZE_MAX (#7), amortising
+                                    the fixed ~400MB spawn cost over more jobs
+      - comfortable             -> the requested ceiling (normally EVAL_BATCH_SIZE)
+      - elevated / critical     -> shrink, down to a single job
+      - at/above the abort line -> 0 (caller WAITS, pacing #4 — it never caps the
+                                    total work, only how much it attempts per step)
     """
-    frac = _swap_usage_fraction()
+    frac = _memory_badness_fraction()
     if frac is None:
         return ceiling
-    if frac <= SWAP_COMFORTABLE_THRESHOLD:
+    if frac <= MEM_PLENTY_THRESHOLD:
+        return EVAL_BATCH_SIZE_MAX
+    if frac <= MEM_COMFORTABLE_THRESHOLD:
         return ceiling
-    if frac <= SWAP_ELEVATED_THRESHOLD:
+    if frac <= MEM_ELEVATED_THRESHOLD:
         return max(1, ceiling // 2)
-    if frac <= SWAP_CRITICAL_THRESHOLD:
+    if frac <= MEM_CRITICAL_THRESHOLD:
         return 1
     return 0
 
@@ -715,45 +1277,65 @@ MEMORY_RETRY_ATTEMPTS = 5
 MEMORY_RETRY_DELAY_SECONDS = 60
 
 
+def _memory_status_str() -> str:
+    """Human-readable one-liner of the current memory signals, for logs."""
+    ram = _ram_badness_fraction()
+    swap_free = None
+    try:
+        out = subprocess.run(["sysctl", "vm.swapusage"], capture_output=True,
+                             text=True, timeout=5).stdout
+        m = re.search(r"free = ([\d.]+)M", out)
+        swap_free = float(m.group(1)) if m else None
+    except Exception:
+        pass
+    ram_s = f"RAM {(1 - ram) * 100:.0f}% available" if ram is not None else "RAM n/a"
+    swap_s = f"swap {swap_free:.0f}MB free" if swap_free is not None else "swap n/a"
+    return f"{ram_s}, {swap_s}"
+
+
 def _check_memory_pressure_or_abort(context: str) -> bool:
     """
-    Swap-usage check with retry-and-backoff. Returns True if it's safe to
-    continue. On sustained high swap usage — not just a momentary reading —
+    Memory-pressure check with retry-and-backoff. Returns True if it's safe to
+    continue. On sustained critical pressure — not just a momentary reading —
     logs a warning, fires a macOS notification so this is discovered the
     same day rather than by chance days later, and returns False so the
     caller can stop the run cleanly (write final state, close the DB)
     instead of continuing blind and risking exactly the kind of
     system-wide resource exhaustion that can end in a kernel panic.
     Fails open — a broken check should never itself be the reason a run
-    stops.
+    stops. Signal is _memory_badness_fraction (available RAM primary, free-swap
+    backstop), NOT raw swap-used% — see that function.
     """
     for attempt in range(MEMORY_RETRY_ATTEMPTS):
-        frac = _swap_usage_fraction()
+        frac = _memory_badness_fraction()
         if frac is None:
             return True
-        if frac <= SWAP_ABORT_THRESHOLD:
+        if frac <= MEM_ABORT_THRESHOLD:
             return True
         if attempt < MEMORY_RETRY_ATTEMPTS - 1:
             print(
-                f"  [WARN] swap usage at {frac:.0%} ({context}) — waiting "
-                f"{MEMORY_RETRY_DELAY_SECONDS}s and rechecking "
+                f"  [WARN] memory pressure {frac:.0%} ({_memory_status_str()}) "
+                f"({context}) — waiting {MEMORY_RETRY_DELAY_SECONDS}s and rechecking "
                 f"({attempt + 1}/{MEMORY_RETRY_ATTEMPTS}) before giving up.",
                 file=sys.stderr,
             )
             time.sleep(MEMORY_RETRY_DELAY_SECONDS)
         else:
             print(
-                f"  [WARN] swap usage still at {frac:.0%} after "
-                f"{MEMORY_RETRY_ATTEMPTS} checks over "
+                f"  [WARN] memory pressure still critical ({frac:.0%}, "
+                f"{_memory_status_str()}) after {MEMORY_RETRY_ATTEMPTS} checks over "
                 f"{MEMORY_RETRY_ATTEMPTS * MEMORY_RETRY_DELAY_SECONDS}s ({context}) "
                 f"— stopping run early rather than continuing under memory "
                 f"pressure. Use --redo-unknown to pick up where this left off "
                 f"once memory frees up.",
                 file=sys.stderr,
             )
+            _flag_issue(f"run stopped early for memory pressure during {context} "
+                        f"({_memory_status_str()})")
+            RUN_STATS["memory_paused"] = True
             _notify(
                 "Job scan paused — low memory",
-                f"Stopped after {context} — swap at {frac:.0%}. "
+                f"Stopped after {context} — {_memory_status_str()}. "
                 f"Run --redo-unknown once memory frees up.",
             )
             return False
@@ -764,62 +1346,95 @@ AUTO_RESUME_MAX_WAIT_SECONDS = 1800  # give memory up to 30 min to recover
 AUTO_RESUME_POLL_SECONDS     = 300   # ...checking every 5 min
 
 
-def _auto_resume_after_pause() -> None:
-    """
-    A run that paused for memory pressure used to just sit there until a
-    human noticed the notification and remembered to run --redo-unknown by
-    hand — which is exactly what let 227 jobs across two separate days go
-    silently unevaluated. This waits (bounded) for swap to actually recover,
-    then launches exactly ONE follow-up --redo-unknown pass automatically.
+MAX_DRAIN_ROUNDS = 20  # backstop on #3 chained passes (20 x up to 150 evals each)
 
-    Bounded to a single attempt by construction: the follow-up run is invoked
-    with --no-auto-resume, so even if IT also pauses, nothing chains further.
-    A chronically memory-starved machine still ends up needing a human, same
-    as before — this only closes the gap for the common case where memory
-    was just transiently tight and would have recovered anyway.
+
+def _unevaluated_count() -> int:
+    """How many listings are still waiting for a real rating (fit_rating empty,
+    NULL, or 'Unknown'). Opens its own short-lived connection so it can be read
+    between chained passes without holding anything open."""
+    try:
+        c = sqlite3.connect(DB_PATH)
+        n = c.execute(
+            "SELECT COUNT(*) FROM seen_jobs "
+            "WHERE fit_rating IN ('Unknown', '') OR fit_rating IS NULL"
+        ).fetchone()[0]
+        c.close()
+        return int(n)
+    except Exception:
+        return 0
+
+
+def _drain_backlog_loop() -> None:
+    """
+    #3 loop-to-completion. After the top-level pass finishes — whether it stopped
+    for memory pressure OR hit the per-pass MAX_EVALUATIONS ceiling — keep
+    launching --redo-unknown passes until the unevaluated backlog is empty. This
+    is what turns a "degraded, N left unevaluated" finish into a slower but
+    COMPLETE one, with no human needed.
+
+    (Replaced the old single-shot auto-resume, which only fired on a memory pause
+    and ran exactly one follow-up pass — so an ordinary cap-hit, like the run that
+    left 263 unevaluated, was never picked up automatically.)
+
+    Each pass is a fresh process (so the ~400MB spawns are fully released between
+    rounds) invoked with --no-auto-resume, so only this top-level run orchestrates
+    the loop; a child never recurses. Before each round it waits, bounded, for
+    memory to drop below the abort line — pacing, not thrashing. Bounded to
+    MAX_DRAIN_ROUNDS as a backstop.
     """
     if "--no-auto-resume" in sys.argv:
-        return
-    print(
-        f"\n[auto-resume] waiting up to {AUTO_RESUME_MAX_WAIT_SECONDS}s for "
-        f"memory to recover before retrying automatically...",
-        file=sys.stderr,
-    )
-    waited = 0
-    recovered = False
-    while waited < AUTO_RESUME_MAX_WAIT_SECONDS:
-        time.sleep(AUTO_RESUME_POLL_SECONDS)
-        waited += AUTO_RESUME_POLL_SECONDS
-        frac = _swap_usage_fraction()
-        if frac is None or frac <= SWAP_ABORT_THRESHOLD:
-            recovered = True
-            break
-        print(f"  [auto-resume] still at {frac:.0%} swap after {waited}s...", file=sys.stderr)
+        return  # a child drain pass — never orchestrate further
 
-    if not recovered:
-        print(
-            f"[auto-resume] memory never recovered after {AUTO_RESUME_MAX_WAIT_SECONDS}s "
-            f"— giving up. Run --redo-unknown by hand once memory frees up.",
-            file=sys.stderr,
-        )
-        return
+    _release_single_instance_lock()  # release so each child pass can take the lock
+    for rnd in range(1, MAX_DRAIN_ROUNDS + 1):
+        remaining = _unevaluated_count()
+        if remaining == 0:
+            print("\n[drain] backlog empty — every listing has been evaluated.")
+            _write_state(phase="done")
+            return
 
-    print("[auto-resume] memory recovered — launching one --redo-unknown pass...", file=sys.stderr)
-    _release_single_instance_lock()
-    try:
-        subprocess.run(
-            [sys.executable, str(Path(__file__).resolve()), "--redo-unknown", "--no-auto-resume"],
-            cwd=str(BASE_DIR),
-        )
-    except Exception as e:
-        print(f"[auto-resume] follow-up run failed to launch: {e}", file=sys.stderr)
+        # Pace (#4): wait, bounded, until memory is safe before launching a pass.
+        waited = 0
+        while True:
+            frac = _memory_badness_fraction()
+            if frac is None or frac <= MEM_ABORT_THRESHOLD:
+                break
+            if waited >= AUTO_RESUME_MAX_WAIT_SECONDS:
+                print(f"\n[drain] {remaining} listing(s) still unevaluated, but memory "
+                      f"stayed critical for {waited}s ({_memory_status_str()}) — stopping. "
+                      f"Run `scripts/morning_scan.py --redo-unknown` once memory frees up.",
+                      file=sys.stderr)
+                _notify("Job scan — backlog remains",
+                        f"{remaining} listing(s) unevaluated; memory critical. Run --redo-unknown later.")
+                return
+            print(f"  [drain] memory at {frac:.0%} ({_memory_status_str()}), waiting "
+                  f"{AUTO_RESUME_POLL_SECONDS}s before the next pass ({remaining} left)...",
+                  file=sys.stderr)
+            time.sleep(AUTO_RESUME_POLL_SECONDS)
+            waited += AUTO_RESUME_POLL_SECONDS
+
+        print(f"\n[drain] round {rnd}/{MAX_DRAIN_ROUNDS}: {remaining} unevaluated remain "
+              f"— launching a --redo-unknown pass...", file=sys.stderr)
+        try:
+            subprocess.run(
+                [sys.executable, str(Path(__file__).resolve()), "--redo-unknown", "--no-auto-resume"],
+                cwd=str(BASE_DIR),
+            )
+        except Exception as e:
+            print(f"[drain] follow-up pass failed to launch: {e} — stopping loop.", file=sys.stderr)
+            return
+
+    print(f"\n[drain] reached MAX_DRAIN_ROUNDS={MAX_DRAIN_ROUNDS}; "
+          f"{_unevaluated_count()} may still remain — run --redo-unknown to finish.",
+          file=sys.stderr)
 
 
 def run_cli(portal_cfg: dict, args: list[str]) -> list[dict]:
     """Run a portal CLI command and return the results list, or [] on error."""
     cmd = [sys.executable, BUN_GUARD, portal_cfg["cli"]] + args
     try:
-        result = _run_with_group_kill(cmd, cwd=str(BASE_DIR), timeout=60)
+        result = _run_with_group_kill(cmd, cwd=str(BASE_DIR), timeout=60, stdout_to_file=True)
         if result.returncode != 0:
             print(f"  [WARN] {portal_cfg['name']} CLI error: {result.stderr[:200]}", file=sys.stderr)
             return []
@@ -944,7 +1559,7 @@ def fetch_detail(portal_cfg: dict, job_id: str) -> str:
     args = portal_cfg["detail"](job_id)
     cmd  = [sys.executable, BUN_GUARD, portal_cfg["cli"]] + args
     try:
-        result = _run_with_group_kill(cmd, cwd=str(BASE_DIR), timeout=60)
+        result = _run_with_group_kill(cmd, cwd=str(BASE_DIR), timeout=60, stdout_to_file=True)
         return result.stdout.strip() if result.returncode == 0 else ""
     except Exception:
         return ""
@@ -1038,8 +1653,17 @@ def evaluate_fit_batch(jobs: list[dict]) -> list[tuple[str, str]]:
             input=prompt,
             timeout=40 + 20 * len(evaluable_jobs),
             cwd=str(BASE_DIR),
+            mem_ceiling_mb=CLAUDE_SPAWN_MEM_CEILING_MB,
         )
+    except SpawnMemoryKilled as e:
+        RUN_STATS["mem_killed_spawns"] += 1
+        RUN_STATS["eval_failed"] += len(evaluable_idx)
+        print(f"  [WARN] claude --print (batch of {len(evaluable_jobs)}) {e}", file=sys.stderr)
+        for i in evaluable_idx:
+            results[i] = ("Unknown", "Evaluation spawn killed by memory watchdog.")
+        return results
     except Exception as e:
+        RUN_STATS["eval_failed"] += len(evaluable_idx)
         print(f"  [WARN] claude --print (batch of {len(evaluable_jobs)}) failed: {e}", file=sys.stderr)
         for i in evaluable_idx:
             results[i] = ("Unknown", "Batch evaluation failed.")
@@ -1091,6 +1715,14 @@ def write_digest(new_jobs: list[dict], n_portals: int, n_new: int, total_cache: 
     not_evaluated = buckets["Not Evaluated"]
 
     lines = [f"# Morning Job Scan — {TODAY}", ""]
+
+    health_problems = _run_health_problems()
+    if health_problems:
+        lines.append("> ⚠️ **Run health: DEGRADED / incomplete** — this digest may "
+                     "not reflect a full scan:")
+        for p in health_problems:
+            lines.append(f"> - {p}")
+        lines.append("")
 
     if n_new == 0:
         lines += ["*No new listings found today.*", ""]
@@ -1175,9 +1807,12 @@ def _should_flush(pending: list[dict]) -> bool:
     """
     if not pending:
         return False
-    if len(pending) >= EVAL_BATCH_SIZE:
+    target = _adaptive_batch_size(EVAL_BATCH_SIZE)
+    # target > EVAL_BATCH_SIZE when RAM is plentiful (#7) -> wait to accumulate a
+    # bigger batch; target < EVAL_BATCH_SIZE under pressure -> flush now small.
+    if len(pending) >= target:
         return True
-    return _adaptive_batch_size(EVAL_BATCH_SIZE) < EVAL_BATCH_SIZE
+    return target < EVAL_BATCH_SIZE
 
 
 def _flush_eval_batch(
@@ -1188,9 +1823,9 @@ def _flush_eval_batch(
 ) -> tuple[int, bool, list[dict], list[dict]]:
     """
     Evaluate as much of `pending` as is currently safe — up to
-    _adaptive_batch_size(), which shrinks as swap pressure rises instead of
+    _adaptive_batch_size(), which shrinks as memory pressure rises instead of
     the pipeline just refusing to proceed. Only when even a single evaluation
-    is unsafe (swap at/above SWAP_CRITICAL_THRESHOLD, sustained through
+    is unsafe (memory at/above MEM_CRITICAL_THRESHOLD, sustained through
     retries) does this actually pause the run.
 
     Returns (new_eval_count, stopped_for_memory, evaluated_jobs, leftover).
@@ -1234,7 +1869,12 @@ def _flush_eval_batch(
         phase="evaluating", current_portal=to_process[-1]["portal"], eval_count=eval_count,
         last_action=f"batch-evaluated {len(to_process)}: last={to_process[-1]['title'][:60]} @ {to_process[-1]['portal']}",
     )
-    time.sleep(0.5)
+    # #5 pace: a longer cooldown under pressure gives the OS time to reclaim the
+    # ~400MB this spawn just released before the next one starts, so a tight run
+    # settles rather than ratchets upward.
+    _frac = _memory_badness_fraction() or 0.0
+    time.sleep(3.0 if _frac > MEM_ELEVATED_THRESHOLD else
+               1.0 if _frac > MEM_COMFORTABLE_THRESHOLD else 0.5)
     return eval_count, False, evaluated, leftover
 
 
@@ -1304,11 +1944,21 @@ def _finish_run(conn: sqlite3.Connection, mode: str, run_count: int, stopped_for
     else:
         print("No Strong/Good fits today.")
 
+    _print_run_health()
+
     send_notification(strong, good, digest_path)
-    if stopped_for_memory:
-        _auto_resume_after_pause()
+    _write_state(run_issues=RUN_STATS["issues"])
+
+    if "--no-auto-resume" in sys.argv:
+        # A child drain pass: never orchestrate further. Just record terminal
+        # state; if it stopped for memory, leave the paused state for the parent
+        # loop (and the crash reporter) to see.
+        if not stopped_for_memory:
+            _write_state(phase="done")
     else:
-        _write_state(phase="done")
+        # Top-level run: chain --redo-unknown passes until the backlog is fully
+        # drained (#3). Self-gates when there's nothing left and marks phase=done.
+        _drain_backlog_loop()
 
 
 # ============================================================
@@ -1320,10 +1970,18 @@ def main() -> None:
     redo_mode     = "--redo-unknown" in sys.argv
     mode = "POPULATE CACHE (no evaluation)" if populate_only else ("redo Unknown/unevaluated" if redo_mode else "scan + evaluate")
     print(f"=== Morning scan {TODAY} [{mode}] ===")
+    print(f"  relevance ranking: "
+          f"{'Groq (' + GROQ_MODEL + ')' if GROQ_API_KEY else 'keyword (set GROQ_API_KEY for semantic ranking)'}")
     DIGESTS.mkdir(parents=True, exist_ok=True)
 
     _acquire_single_instance_lock()
     _report_previous_run_if_crashed()
+
+    # #4 pace, don't cap: we deliberately do NOT lower MAX_EVALUATIONS when RAM is
+    # tight at launch (that only guaranteed a degraded, incomplete finish). The run
+    # instead keeps the full workload and absorbs memory pressure by pacing — the
+    # per-flush adaptive batch size shrinks to 1 and waits under pressure (#5) — and
+    # _drain_backlog_loop (#3) chains follow-up passes until the backlog is empty.
     _write_state(
         pid=os.getpid(),
         started_at=datetime.now(tz=timezone.utc).isoformat(),
@@ -1355,12 +2013,17 @@ def main() -> None:
             "SELECT portal, job_id, title, company, url FROM seen_jobs "
             "WHERE fit_rating IN ('Unknown', '') OR fit_rating IS NULL"
         ).fetchall()
+        # #6: re-evaluate the most relevant backlog first.
+        if rows:
+            _rscores = _relevance_scores_for([r[2] or "" for r in rows])
+            rows = [r for _, r in sorted(zip(_rscores, rows), key=lambda p: p[0], reverse=True)]
         print(f"\n[redo] {len(rows)} Unknown/unevaluated jobs (all dates) to re-evaluate")
         stopped_for_memory = False
         pending: list[dict] = []
         for portal_name, job_id, title, company, url in rows:
             if (eval_count + len(pending)) >= MAX_EVALUATIONS:
                 print(f"\n[limit] MAX_EVALUATIONS={MAX_EVALUATIONS} reached in redo pass")
+                RUN_STATS["cap_hit"] = True
                 break
             portal_cfg = portal_by_name.get(portal_name)
             if not portal_cfg:
@@ -1372,12 +2035,20 @@ def main() -> None:
                 update_fit(conn, portal_name, job_id, rating,
                            f"{notes} (duplicate posting — rating copied from an earlier listing)")
                 continue
+            prefilter = _prefilter_rating(title or "")
+            if prefilter:
+                rating, notes = prefilter
+                RUN_STATS["prefiltered"] += 1
+                update_fit(conn, portal_name, job_id, rating, notes)
+                continue
             description = fetch_detail(portal_cfg, job_id)
             if len(description.strip()) < MIN_DESCRIPTION_CHARS:
+                RUN_STATS["empty_detail"] += 1
                 update_fit(conn, portal_name, job_id, "No Fit",
                            "Detail fetch returned empty — listing likely removed/expired.")
                 continue
             if is_stale(description, portal_name):
+                RUN_STATS["stale"] += 1
                 update_fit(conn, portal_name, job_id, "No Fit", "Stale listing (posted >48h ago).")
                 continue
             pending.append({"portal": portal_name, "job_id": job_id, "title": title or "",
@@ -1416,7 +2087,18 @@ def main() -> None:
         # Deduplicate against cache
         new_ids = [jid for jid in found if not is_seen(conn, portal_name, jid)]
         print(f"  {len(found)} found, {len(new_ids)} new")
+        if not found:
+            # Zero listings from a portal that should have some is a coverage
+            # red flag (broken query, changed site, dead CLI) — surface it in
+            # the run-health banner rather than letting it pass as "nothing new".
+            RUN_STATS["portals_zero"].append(portal_name)
 
+        # #6: evaluate this portal's most relevant listings first, so a
+        # partial/paced finish still surfaces the best matches (never drops any).
+        if new_ids:
+            _rscores = _relevance_scores_for([found[jid].get("title", "") for jid in new_ids])
+            new_ids = [jid for _, jid in sorted(zip(_rscores, new_ids),
+                                                key=lambda p: p[0], reverse=True)]
         found_by_portal[portal_name] = found
         portal_queues.append((portal_cfg, new_ids))
 
@@ -1460,13 +2142,23 @@ def main() -> None:
                                f"{notes} (duplicate posting — rating copied from an earlier listing)")
                     continue
 
+                prefilter = _prefilter_rating(title)
+                if prefilter:
+                    rating, notes = prefilter
+                    RUN_STATS["prefiltered"] += 1
+                    print(f"  [{portal_name}] → pre-filtered, no spawn spent: {title[:60]}")
+                    update_fit(conn, portal_name, jid, rating, notes)
+                    continue
+
                 description = fetch_detail(portal_cfg, jid)
                 if len(description.strip()) < MIN_DESCRIPTION_CHARS:
+                    RUN_STATS["empty_detail"] += 1
                     print(f"  [{portal_name}] → empty detail fetch, skipping: {title[:60]}")
                     update_fit(conn, portal_name, jid, "No Fit",
                                "Detail fetch returned empty — listing likely removed/expired.")
                     continue
                 if is_stale(description, portal_name):
+                    RUN_STATS["stale"] += 1
                     print(f"  [{portal_name}] → stale (>48h), skipping: {title[:60]}")
                     update_fit(conn, portal_name, jid, "No Fit", "Stale listing (posted >48h ago).")
                     continue
@@ -1489,6 +2181,7 @@ def main() -> None:
 
         if eval_count >= MAX_EVALUATIONS:
             print(f"\n[limit] MAX_EVALUATIONS={MAX_EVALUATIONS} reached, remaining listings stay unevaluated until next run")
+            RUN_STATS["cap_hit"] = True
 
     if populate_only:
         total_cache = cache_size(conn)
