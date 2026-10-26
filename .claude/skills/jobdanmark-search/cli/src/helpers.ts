@@ -65,3 +65,20 @@ export function writeError(error: string, code: string): void {
 export function stripHtml(html: string): string {
   return html.replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim()
 }
+
+// Decode the HTML entities jobdanmark embeds in its JSON-LD text fields —
+// including numeric ones (&#x2019; &#xE6; …) the old detail parser left raw,
+// so Danish characters and smart punctuation came out as literal entities.
+// &amp; is decoded last so an already-decoded "&" isn't re-expanded.
+export function decodeEntities(s: string): string {
+  if (!s) return s
+  return s
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, h) => String.fromCodePoint(parseInt(h, 16)))
+    .replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(parseInt(d, 10)))
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&")
+}

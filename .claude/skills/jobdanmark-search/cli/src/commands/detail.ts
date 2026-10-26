@@ -1,6 +1,6 @@
 import { defineCommand, option } from "@bunli/core"
 import { z } from "zod"
-import { BASE_URL, writeError, stripHtml } from "../helpers.js"
+import { BASE_URL, writeError, stripHtml, decodeEntities } from "../helpers.js"
 
 interface JobDetail {
   slug: string
@@ -48,7 +48,9 @@ export const detail = defineCommand({
       process.exit(1)
     }
 
-    const ldMatch = html.match(/<script type="application\/ld(?:\+|&#x2B;)json">([\s\S]*?)<\/script>/i)
+    // Attribute-tolerant: the `+` in the ld+json mime type is HTML-encoded as
+    // &#x2B; on jobdanmark, and there may be other attributes on the tag.
+    const ldMatch = html.match(/<script[^>]*type="application\/ld(?:\+|&#x2B;)json"[^>]*>([\s\S]*?)<\/script>/i)
     if (!ldMatch) {
       writeError("Failed to parse JSON-LD from job page", "PARSE_ERROR")
       process.exit(1)
@@ -56,39 +58,49 @@ export const detail = defineCommand({
 
     let ld: any
     try {
-      const decoded = ldMatch[1]
-        .replace(/&#x2B;/g, "+")
-        .replace(/&quot;/g, '"')
-        .replace(/&amp;/g, "&")
-        .replace(/&lt;/g, "<")
-        .replace(/&gt;/g, ">")
-      ld = JSON.parse(decoded)
+      // jobdanmark embeds RAW tab/newline characters inside the JSON-LD
+      // description string — illegal control chars in a JSON string, which made
+      // JSON.parse throw for ~half of all listings (university/PhD/analyst roles
+      // etc.) and silently buried them. Replace control chars with spaces, then
+      // parse. HTML entities are decoded AFTER parsing, per text field, so a
+      // &quot;/&amp; inside a description can't corrupt the JSON structure (the
+      // old pre-parse decode risked exactly that).
+      const cleaned = ldMatch[1].replace(/[\u0000-\u001F]/g, " ")
+      ld = JSON.parse(cleaned)
     } catch {
       writeError("Failed to parse JSON-LD from job page", "PARSE_ERROR")
       process.exit(1)
+    }
+
+    // JSON-LD may be a single object, an array, or wrapped in @graph — pick the
+    // JobPosting node.
+    if (Array.isArray(ld)) {
+      ld = ld.find((x: any) => x?.["@type"] === "JobPosting") ?? ld[0]
+    } else if (Array.isArray(ld?.["@graph"])) {
+      ld = ld["@graph"].find((x: any) => x?.["@type"] === "JobPosting") ?? ld
     }
 
     const address = ld.jobLocation?.address
     const result: JobDetail = {
       slug,
       url,
-      title: ld.title ?? null,
+      title: ld.title ? decodeEntities(ld.title) : null,
       datePosted: ld.datePosted ?? null,
       validThrough: ld.validThrough ?? null,
       employmentType: ld.employmentType ?? null,
       hiringOrganization: ld.hiringOrganization
-        ? { name: ld.hiringOrganization.name ?? null, logo: ld.hiringOrganization.logo ?? null }
+        ? { name: ld.hiringOrganization.name ? decodeEntities(ld.hiringOrganization.name) : null, logo: ld.hiringOrganization.logo ?? null }
         : null,
       jobLocation: address
         ? {
-            streetAddress: address.streetAddress ?? null,
-            addressLocality: address.addressLocality ?? null,
-            addressRegion: address.addressRegion ?? null,
+            streetAddress: address.streetAddress ? decodeEntities(address.streetAddress) : null,
+            addressLocality: address.addressLocality ? decodeEntities(address.addressLocality) : null,
+            addressRegion: address.addressRegion ? decodeEntities(address.addressRegion) : null,
             postalCode: address.postalCode ?? null,
             addressCountry: address.addressCountry ?? null,
           }
         : null,
-      description: ld.description ?? null,
+      description: ld.description ? decodeEntities(ld.description) : null,
     }
 
     if (flags.format === "plain") {

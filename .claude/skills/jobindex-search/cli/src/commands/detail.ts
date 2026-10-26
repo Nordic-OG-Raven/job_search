@@ -1,6 +1,6 @@
 import { defineCommand, option } from "@bunli/core"
 import { z } from "zod"
-import { BASE_URL, htmlFetch, decodeHtmlEntities, stripTags, writeError } from "../helpers.js"
+import { BASE_URL, htmlFetch, fetchHtmlSafe, extractMainText, decodeHtmlEntities, stripTags, writeError } from "../helpers.js"
 
 interface JobDetail {
   id: string
@@ -95,6 +95,22 @@ export const detail = defineCommand({
       .filter((text) => text.length > 0)
     if (paragraphs.length > 0) {
       description = paragraphs.join("\n\n")
+    }
+
+    // jobindex's own page only carries a short teaser for most listings — the
+    // full job ad lives on the external ATS behind the Apply URL. When the
+    // teaser is thin, fetch that page and use its (much fuller) text so the
+    // downstream fit evaluation sees the actual requirements, not a snippet.
+    // Best-effort: any failure (SPA, 403, timeout) silently keeps the teaser.
+    const TEASER_MIN_CHARS = 600
+    if (applyUrl && /^https?:\/\//i.test(applyUrl) && (description?.length ?? 0) < TEASER_MIN_CHARS) {
+      const extHtml = await fetchHtmlSafe(applyUrl)
+      if (extHtml) {
+        const full = extractMainText(extHtml)
+        if (full && full.length > (description?.length ?? 0)) {
+          description = full.slice(0, 12000)
+        }
+      }
     }
 
     const result: JobDetail = {

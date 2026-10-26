@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import re
+import csv
 import shutil
 import signal
 import subprocess
@@ -71,7 +72,9 @@ os.environ["PATH"] = "/opt/homebrew/bin:" + os.environ.get("PATH", "")
 # human-readable headline problem.
 RUN_STATS: dict = {
     "prefiltered": 0,       # jobs dropped by the cheap title pre-filter (no spawn spent)
-    "empty_detail": 0,      # detail fetch came back empty (listing removed/expired)
+    "empty_detail": 0,      # detail fetch came back empty AFTER retries (genuine transient/parse failure)
+    "expired": 0,           # listing confirmed removed (404/NOT_FOUND) — terminal, not an alarm
+    "external_skipped": 0,  # off-portal (isExternal) listings not fetchable via the portal API
     "stale": 0,             # listing older than the freshness cutoff
     "eval_failed": 0,       # claude --print returned an error / Unknown
     "mem_killed_spawns": 0, # claude --print killed by the per-spawn memory watchdog
@@ -109,13 +112,22 @@ def _run_health_problems() -> list[str]:
         problems.append(f"{s['mem_killed_spawns']} evaluation spawn(s) killed by memory watchdog")
     if s["eval_failed"]:
         problems.append(f"{s['eval_failed']} evaluation(s) failed/Unknown")
+    # Any genuine detail-fetch failure is a problem, period (user rule: not a
+    # percentage threshold). This is only meaningful because off-portal
+    # (isExternal) listings are bucketed separately as "External" and never
+    # reach the fetch path — so a non-zero empty_detail is a real anomaly (a
+    # listing that SHOULD have fetched but didn't), not the routine 404s that
+    # aggregated listings always produce.
+    if s["empty_detail"]:
+        problems.append(f"{s['empty_detail']} detail fetch(es) failed/empty after retries — "
+                        f"those listings left Unknown (run --redo-unknown)")
     return problems
 
 
 def _run_health_counts() -> str:
     s = RUN_STATS
     return (f"pre-filtered={s['prefiltered']} empty-detail={s['empty_detail']} "
-            f"stale={s['stale']}")
+            f"expired={s['expired']} external-skipped={s['external_skipped']} stale={s['stale']}")
 
 
 def _print_run_health() -> None:
@@ -452,6 +464,19 @@ EVAL_BATCH_SIZE_MAX = 15
 # guess. Filter these out before they can spoil otherwise-good jobs sharing
 # their batch.
 MIN_DESCRIPTION_CHARS = 30
+
+# Detail fetches are flaky single ~1.4s node subprocesses; a lone transient
+# failure returning empty used to permanently bury a good listing as a non-fit.
+# Retry a few times with a short backoff before giving up.
+FETCH_DETAIL_ATTEMPTS = 3
+FETCH_DETAIL_BACKOFF  = 0.6  # seconds, multiplied by the attempt number
+
+# Sentinel returned by fetch_detail when the portal reports the listing is GONE
+# (a clean 404 / NOT_FOUND), as opposed to an empty/transient failure. A removed
+# listing is terminal — retrying won't help and it must NOT keep tripping the
+# empty-detail health alarm or sit in the retry backlog forever. Distinct from ""
+# (transient/parse failure, which stays Unknown and retryable).
+DETAIL_GONE = "\x00__DETAIL_NOT_FOUND__\x00"
 
 # How much of a job description actually reaches the model. Confirmed on a
 # real production posting (Terma, 8,908 chars): a 3000-char limit cut the
@@ -822,6 +847,14 @@ def init_db(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE seen_jobs ADD COLUMN eval_version TEXT")
     except sqlite3.OperationalError:
         pass  # column already present
+    # is_external: off-portal aggregated listings (e.g. jobnet isExternal=true)
+    # whose detail can't be fetched via the portal API. Stored so BOTH the main
+    # pass and the DB-driven --redo-unknown pass can bucket them without a
+    # guaranteed-404 fetch. Additive for pre-existing DBs.
+    try:
+        conn.execute("ALTER TABLE seen_jobs ADD COLUMN is_external INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass  # column already present
     conn.commit()
 
 
@@ -833,11 +866,11 @@ def is_seen(conn: sqlite3.Connection, portal: str, job_id: str) -> bool:
 
 
 def mark_seen(conn: sqlite3.Connection, portal: str, job_id: str,
-              title: str, company: str, url: str) -> None:
+              title: str, company: str, url: str, is_external: bool = False) -> None:
     conn.execute(
-        """INSERT OR IGNORE INTO seen_jobs (portal, job_id, title, company, url, first_seen)
-           VALUES (?, ?, ?, ?, ?, ?)""",
-        (portal, str(job_id), title, company, url, TODAY)
+        """INSERT OR IGNORE INTO seen_jobs (portal, job_id, title, company, url, first_seen, is_external)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (portal, str(job_id), title, company, url, TODAY, 1 if is_external else 0)
     )
     conn.commit()
 
@@ -1447,14 +1480,21 @@ def _drain_backlog_loop() -> None:
           file=sys.stderr)
 
 
-def run_cli(portal_cfg: dict, args: list[str]) -> list[dict]:
-    """Run a portal CLI command and return the results list, or [] on error."""
+def run_cli(portal_cfg: dict, args: list[str]) -> tuple[list[dict], bool]:
+    """Run a portal CLI command. Returns (results, ok).
+
+    ok is False whenever the CLI genuinely FAILED (non-zero exit, timeout,
+    exception, or unparseable output with nothing salvageable) — as opposed to
+    succeeding with a legitimately empty result list (ok=True, []). The caller
+    needs this distinction: a failed search misreported as "0 listings" reads as
+    a quiet day when it's actually a broken scan (the Sunday all-portals-zero
+    bug)."""
     cmd = [sys.executable, BUN_GUARD, portal_cfg["cli"]] + args
     try:
         result = _run_with_group_kill(cmd, cwd=str(BASE_DIR), timeout=60, stdout_to_file=True)
         if result.returncode != 0:
             print(f"  [WARN] {portal_cfg['name']} CLI error: {result.stderr[:200]}", file=sys.stderr)
-            return []
+            return [], False
         try:
             data = json.loads(result.stdout)
         except json.JSONDecodeError:
@@ -1462,27 +1502,41 @@ def run_cli(portal_cfg: dict, args: list[str]) -> list[dict]:
             salvaged = _extract_results_from_text(result.stdout)
             if salvaged:
                 print(f"  [INFO] {portal_cfg['name']}: partial JSON, salvaged {len(salvaged)} results", file=sys.stderr)
-            else:
-                # Must not stay silent here — a genuine parse failure with no
-                # salvageable results looks identical to "0 new listings" if
-                # nothing is logged, and a real portal-CLI failure gets
-                # mistaken for an unusually quiet day.
-                print(f"  [WARN] {portal_cfg['name']}: could not parse CLI output as JSON "
-                      f"and salvage found nothing — stdout[:200]={result.stdout[:200]!r}", file=sys.stderr)
-            return salvaged
+                return salvaged, True  # salvage worked — treat as a (degraded) success
+            # Must not stay silent here — a genuine parse failure with no
+            # salvageable results looks identical to "0 new listings" if
+            # nothing is logged, and a real portal-CLI failure gets
+            # mistaken for an unusually quiet day.
+            print(f"  [WARN] {portal_cfg['name']}: could not parse CLI output as JSON "
+                  f"and salvage found nothing — stdout[:200]={result.stdout[:200]!r}", file=sys.stderr)
+            return [], False
         # Normalise: results list may live under different keys
         if isinstance(data, list):
-            return data
+            return data, True
         for key in ("results", "jobs", "listings", "jobAds"):
             if key in data and isinstance(data[key], list):
-                return data[key]
-        return []
+                return data[key], True
+        return [], True  # parsed fine, just no results array — a real empty
     except subprocess.TimeoutExpired:
         print(f"  [WARN] {portal_cfg['name']} timed out", file=sys.stderr)
-        return []
+        return [], False
     except Exception as e:
         print(f"  [WARN] {portal_cfg['name']} error: {e}", file=sys.stderr)
-        return []
+        return [], False
+
+
+def _listing_url(portal: str, job_id: str, raw: dict) -> str:
+    """Prefer a URL the CLI already gave us; otherwise construct a known public
+    one. jobnet's search JSON carries no url field at all, which is why every
+    jobnet digest row rendered as an empty [link]() — construct the public
+    detail URL from the jobAdId so both native and external jobnet listings are
+    clickable."""
+    u = (raw.get("url") or "").strip()
+    if u:
+        return u
+    if portal == "jobnet" and job_id:
+        return f"https://job.jobnet.dk/CV/FindWork/Details/{job_id}"
+    return u
 
 
 _MONTH_MAP = {
@@ -1572,14 +1626,34 @@ def is_stale(detail_text: str, portal_name: str) -> bool:
 
 
 def fetch_detail(portal_cfg: dict, job_id: str) -> str:
-    """Fetch full job description as plain text."""
+    """Fetch full job description as plain text, retrying a few times.
+
+    A single transient subprocess/network hiccup returning empty used to get
+    the listing permanently written off as a non-fit, so retry before giving up.
+    Only genuine failures (empty output or non-zero exit) are retried; a real
+    body is returned immediately."""
     args = portal_cfg["detail"](job_id)
     cmd  = [sys.executable, BUN_GUARD, portal_cfg["cli"]] + args
-    try:
-        result = _run_with_group_kill(cmd, cwd=str(BASE_DIR), timeout=60, stdout_to_file=True)
-        return result.stdout.strip() if result.returncode == 0 else ""
-    except Exception:
-        return ""
+    for attempt in range(FETCH_DETAIL_ATTEMPTS):
+        try:
+            result = _run_with_group_kill(cmd, cwd=str(BASE_DIR), timeout=60, stdout_to_file=True)
+            if result.returncode == 0:
+                text = result.stdout.strip()
+                if text:
+                    return text
+            else:
+                # A clean "not found" is deterministic — the listing was removed
+                # or its detail isn't served. Retrying won't help, and it must not
+                # be conflated with a transient failure, so signal it distinctly
+                # and stop immediately.
+                err = result.stderr or ""
+                if "NOT_FOUND" in err or "not found" in err.lower():
+                    return DETAIL_GONE
+        except Exception:
+            pass
+        if attempt + 1 < FETCH_DETAIL_ATTEMPTS:
+            time.sleep(FETCH_DETAIL_BACKOFF * (attempt + 1))
+    return ""
 
 # ============================================================
 #  FIT EVALUATION
@@ -1644,7 +1718,8 @@ def evaluate_fit_batch(jobs: list[dict]) -> list[tuple[str, str]]:
     evaluable_idx = []
     for i, j in enumerate(jobs):
         if len(j["description"].strip()) < MIN_DESCRIPTION_CHARS:
-            results[i] = ("No Fit", "Detail fetch returned empty — listing likely removed/expired.")
+            results[i] = ("Unknown", "Detail fetch returned empty after retries — left Unknown for "
+                                     "re-evaluation (run --redo-unknown); NOT judged a non-fit.")
         else:
             evaluable_idx.append(i)
 
@@ -1712,6 +1787,111 @@ def evaluate_fit_batch(jobs: list[dict]) -> list[tuple[str, str]]:
 #  DIGEST WRITER
 # ============================================================
 
+def _norm_company(s: str) -> str:
+    """Normalize a company name for tracker matching (lowercase, drop legal suffixes
+    and punctuation)."""
+    s = (s or "").lower().strip()
+    for suf in (" a/s", " aps", " p/s", " k/s", " i/s", " a.m.b.a", " amba",
+                " inc", " ltd", " llc", " gmbh", " ab", " as"):
+        if s.endswith(suf):
+            s = s[: -len(suf)]
+    s = re.sub(r"[^a-z0-9 ]+", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _load_tracker_index() -> dict:
+    """Map normalized company -> list of {role,date,status} from the application
+    tracker, used to flag digest fits already drafted/applied to. Returns {} when no
+    tracker exists, so the scan stays backward-compatible for users without one."""
+    for cand in (BASE_DIR / "job_search_tracker.csv",
+                 BASE_DIR / "job_scraper" / "job_search_tracker.csv"):
+        try:
+            if not cand.exists():
+                continue
+            idx: dict[str, list[dict]] = {}
+            with cand.open(newline="", encoding="utf-8") as fh:
+                for row in csv.DictReader(fh):
+                    comp = _norm_company(row.get("company", ""))
+                    if not comp:
+                        continue
+                    idx.setdefault(comp, []).append({
+                        "role":    (row.get("role") or "").strip(),
+                        "date":    (row.get("date") or "").strip(),
+                        "status":  (row.get("status") or "").strip(),
+                        "company": (row.get("company") or "").strip(),
+                    })
+            return idx
+        except Exception:
+            return {}
+    return {}
+
+
+def _tracker_hits(company: str, idx: dict) -> list[dict]:
+    """Tracker entries whose company matches `company` — exact-normalized, or
+    substring either way for 3+ char names ('LEGO' vs 'the LEGO Group')."""
+    if not idx:
+        return []
+    c = _norm_company(company)
+    if not c:
+        return []
+    hits: list[dict] = []
+    for tcomp, rows in idx.items():
+        if c == tcomp or (len(c) >= 3 and len(tcomp) >= 3 and (c in tcomp or tcomp in c)):
+            hits += rows
+    return hits
+
+
+# A fit is only called a "repost" of something already handled when the COMPANY matches AND
+# the TITLE overlaps AND the prior application was recent. Company alone is far too coarse (big
+# orgs like a university or retailer post many unrelated roles); and even same company + same
+# title from long ago is usually a genuinely new vacancy, not a duplicate.
+REPOST_WINDOW_DAYS = 30
+
+_TITLE_STOP = {"til", "og", "med", "for", "i", "på", "hos", "en", "et", "af", "de", "der",
+               "vores", "ny", "nye", "job", "the", "to", "a", "of", "and", "with", "as", "søger"}
+
+
+def _title_tokens(title: str, company: str = "") -> set:
+    """Significant title words (lowercased, punctuation/stopwords/company-words removed)."""
+    toks = set(re.sub(r"[^a-z0-9 ]+", " ", (title or "").lower()).split())
+    toks -= _TITLE_STOP
+    toks -= set(_norm_company(company).split())  # shared company words must not count as a title match
+    return {t for t in toks if len(t) >= 2}
+
+
+def _days_since(iso_date: str) -> "int | None":
+    try:
+        return (date.today() - date.fromisoformat(iso_date[:10])).days
+    except Exception:
+        return None
+
+
+def _classify_tracker(job_title: str, job_company: str, hits: list[dict]) -> tuple:
+    """Classify a surfaced fit against its tracker company-matches using title + recency:
+      ("repost", [hits]) -> same company + overlapping title + recent (<=REPOST_WINDOW_DAYS):
+                            likely the same posting already drafted/applied to.
+      ("note", str)      -> same company but a different title, OR an overlapping title applied
+                            long ago (possible new vacancy): keep it in the fresh tier, annotate.
+      (None, None)       -> nothing noteworthy.
+    """
+    if not hits:
+        return (None, None)
+    jt = _title_tokens(job_title, job_company)
+    recent_same, old_same = [], []
+    for h in hits:
+        shared = jt & _title_tokens(h.get("role", ""), h.get("company", "") or job_company)
+        if len(shared) >= 2:
+            d = _days_since(h.get("date", ""))
+            (recent_same if (d is not None and d <= REPOST_WINDOW_DAYS) else old_same).append(h)
+    if recent_same:
+        return ("repost", recent_same)
+    if old_same:
+        h = sorted(old_same, key=lambda x: x.get("date", ""), reverse=True)[0]
+        return ("note", f"NB: applied for a similar title at {job_company} on {h['date']} — may be a new vacancy")
+    h = sorted(hits, key=lambda x: x.get("date", ""), reverse=True)[0]
+    return ("note", f"NB: applied to {job_company} before ({len(hits)}x, different role; most recent {h['date']})")
+
+
 def write_digest(new_jobs: list[dict], n_portals: int, n_new: int, total_cache: int) -> Path:
     DIGESTS.mkdir(parents=True, exist_ok=True)
     path = DIGESTS / f"{TODAY}.md"
@@ -1721,6 +1901,8 @@ def write_digest(new_jobs: list[dict], n_portals: int, n_new: int, total_cache: 
         "Good Fit":      [],
         "Borderline":    [],
         "No Fit":        [],
+        "External":      [],  # off-portal aggregated listing — can't be fit-rated here, needs a manual look
+        "Expired":       [],  # listing confirmed removed (404) — terminal, shown only as a footer count
         "Unknown":       [],
         "Not Evaluated": [],  # fit_rating == "" — search found it, but it never got a detail-fetch + evaluate_fit call (e.g. run paused for memory pressure)
     }
@@ -1752,15 +1934,32 @@ def write_digest(new_jobs: list[dict], n_portals: int, n_new: int, total_cache: 
             )
             lines.append("")
 
+        tracker_idx = _load_tracker_index()
+        reposts: list[tuple] = []  # (tier, job, hits) — likely the SAME posting already drafted/applied to
+
         for bucket_name in ("Strong Fit", "Good Fit", "Borderline"):
             jobs = buckets[bucket_name]
             if not jobs:
                 continue
-            lines.append(f"## {bucket_name} ({len(jobs)})")
+            fresh = []
+            for j in jobs:
+                hits = _tracker_hits(j["company"], tracker_idx)
+                kind, data = _classify_tracker(j["title"], j["company"], hits)
+                if kind == "repost":
+                    reposts.append((bucket_name, j, data))
+                    continue
+                if kind == "note":
+                    # same employer but a different/old-title match — keep it FRESH, just annotate,
+                    # so a genuinely new role at a company applied to before is never buried.
+                    j = {**j, "fit_notes": (j["fit_notes"].rstrip() + "  [" + data + "]").strip()}
+                fresh.append(j)
+            if not fresh:
+                continue
+            lines.append(f"## {bucket_name} ({len(fresh)})")
             lines.append("")
             lines.append("| Portal | Title | Company | URL | Notes |")
             lines.append("|--------|-------|---------|-----|-------|")
-            for j in jobs:
+            for j in fresh:
                 title   = j["title"].replace("|", "\\|")
                 company = j["company"].replace("|", "\\|")
                 notes   = j["fit_notes"].replace("|", "\\|")
@@ -1768,11 +1967,47 @@ def write_digest(new_jobs: list[dict], n_portals: int, n_new: int, total_cache: 
                 lines.append(f"| {j['portal']} | {title} | {company} | [link]({url}) | {notes} |")
             lines.append("")
 
+        # Likely-repost fits: flagged, not filtered. Only entries matching a tracker row on
+        # COMPANY + TITLE + recency land here; same-employer-different-role (or an old same-title
+        # that may be a new vacancy) stays in the fresh tiers above with an inline NB note.
+        if reposts:
+            lines.append(f"## Previously applied / drafted ({len(reposts)} — likely the same posting)")
+            lines.append("")
+            lines.append("| Fit | Portal | Title | Company | URL | Prior (tracker) |")
+            lines.append("|-----|--------|-------|---------|-----|-----------------|")
+            for tier, j, hits in reposts:
+                title   = j["title"].replace("|", "\\|")
+                company = j["company"].replace("|", "\\|")
+                url     = j["url"]
+                recent  = sorted(hits, key=lambda h: h.get("date", ""), reverse=True)
+                prior   = "; ".join(
+                    f"{h['date']}: {(h['role'] or '?')} ({h['status'] or '?'})" for h in recent[:2]
+                ).replace("|", "\\|")
+                if len(hits) > 2:
+                    prior += f"; +{len(hits) - 2} more"
+                lines.append(f"| {tier} | {j['portal']} | {title} | {company} | [link]({url}) | {len(hits)}× — {prior} |")
+            lines.append("")
+
         if not_evaluated:
             lines.append(f"## Not Yet Reviewed ({len(not_evaluated)} — found but never evaluated)")
             lines.append("")
             for j in not_evaluated:
                 lines.append(f"- {j['portal']} · {j['title']} @ {j['company']}")
+            lines.append("")
+
+        external = buckets["External"]
+        if external:
+            lines.append(f"## External — needs manual review ({len(external)})")
+            lines.append("")
+            lines.append("> Off-portal aggregated listings (the portal doesn't serve their body, "
+                         "so they can't be auto-rated). These are NOT rejections — open the link.")
+            lines.append("")
+            lines.append("| Portal | Title | Company | URL |")
+            lines.append("|--------|-------|---------|-----|")
+            for j in external:
+                title   = j["title"].replace("|", "\\|")
+                company = j["company"].replace("|", "\\|")
+                lines.append(f"| {j['portal']} | {title} | {company} | [link]({j['url']}) |")
             lines.append("")
 
         no_fit = buckets["No Fit"] + buckets["Unknown"]
@@ -1783,11 +2018,13 @@ def write_digest(new_jobs: list[dict], n_portals: int, n_new: int, total_cache: 
                 lines.append(f"- {j['portal']} · {j['title']} @ {j['company']}")
             lines.append("")
 
+    expired_n = len(buckets["Expired"])
     lines.append("---")
     lines.append(
         f"*Searched {n_portals} portals · {n_new} new listings found · "
         f"{evaluated_count} evaluated · {len(not_evaluated)} not yet reviewed · "
-        f"{total_cache} total in cache*"
+        + (f"{expired_n} expired/removed · " if expired_n else "")
+        + f"{total_cache} total in cache*"
     )
     lines.append("")
 
@@ -1970,6 +2207,18 @@ def _evaluate_candidates(conn: sqlite3.Connection, candidates: list[dict], eval_
         while (i < n and len(to_fetch) < EVAL_BATCH_SIZE_MAX
                and (eval_count + len(pending) + len(to_fetch)) < MAX_EVALUATIONS):
             c = candidates[i]; i += 1
+            if c.get("is_external"):
+                # Off-portal aggregated listing (e.g. jobnet isExternal): its detail
+                # 404s on the portal API, so don't waste a guaranteed-failing fetch.
+                # Bucket it as "External" (visible, needs manual review) rather than
+                # letting the empty fetch bury it as a non-fit.
+                RUN_STATS["external_skipped"] += 1
+                if verbose:
+                    print(f"  [{c['portal']}] → off-portal (external) listing, bucketed for manual review: {c['title'][:60]}")
+                update_fit(conn, c["portal"], c["job_id"], "External",
+                           "Hosted off-portal (aggregated listing) — detail not fetchable via the "
+                           "portal API; open the link to review.")
+                continue
             existing = find_existing_rating(conn, c["title"], c["company"], c["portal"], c["job_id"])
             if existing:
                 rating, notes = existing
@@ -1996,12 +2245,25 @@ def _evaluate_candidates(conn: sqlite3.Connection, candidates: list[dict], eval_
         # 3) empty/stale checks, then accumulate + flush (unchanged semantics)
         for c in to_fetch:
             description = details.get(c["job_id"], "") or ""
+            if description == DETAIL_GONE:
+                # Confirmed removed/expired (404) — terminal, excluded, and does
+                # NOT trip the empty-detail alarm or linger in the retry backlog.
+                RUN_STATS["expired"] += 1
+                if verbose:
+                    print(f"  [{c['portal']}] → listing gone (404), marking Expired: {c['title'][:60]}")
+                update_fit(conn, c["portal"], c["job_id"], "Expired",
+                           "Listing no longer available (404 after retries) — removed/expired; not a fit judgement.")
+                continue
             if len(description.strip()) < MIN_DESCRIPTION_CHARS:
                 RUN_STATS["empty_detail"] += 1
                 if verbose:
-                    print(f"  [{c['portal']}] → empty detail fetch, skipping: {c['title'][:60]}")
-                update_fit(conn, c["portal"], c["job_id"], "No Fit",
-                           "Detail fetch returned empty — listing likely removed/expired.")
+                    print(f"  [{c['portal']}] → empty detail fetch after retries, left Unknown: {c['title'][:60]}")
+                # NOT "No Fit": an empty fetch is a failure, not a verdict. Writing
+                # Unknown keeps it retryable by --redo-unknown instead of burying a
+                # possibly-good listing where the redo pass can never re-pick it.
+                update_fit(conn, c["portal"], c["job_id"], "Unknown",
+                           "Detail fetch returned empty after retries — left Unknown for "
+                           "re-evaluation (run --redo-unknown); NOT judged a non-fit.")
                 continue
             if is_stale(description, c["portal"]):
                 RUN_STATS["stale"] += 1
@@ -2075,7 +2337,21 @@ def _finish_run(conn: sqlite3.Connection, mode: str, run_count: int, stopped_for
     _print_run_health()
 
     send_notification(strong, good, digest_path)
-    _write_state(run_issues=RUN_STATS["issues"])
+    # Persist a COMPLETE, machine-readable health summary (not just the free-text
+    # issues) so a SessionStart hook can tell, without re-running anything, whether
+    # the last scan was healthy, degraded, or never really ran. run_issues alone
+    # omitted the derived problems (portals_zero, empty_detail, cap_hit, ...).
+    _health = _run_health_problems()
+    _write_state(
+        run_issues=RUN_STATS["issues"],
+        run_health={
+            "problems": _health,
+            "degraded": bool(_health),
+            "counts": {k: RUN_STATS[k] for k in
+                       ("empty_detail", "expired", "external_skipped", "stale", "prefiltered", "eval_failed")},
+            "digest_date": TODAY,
+        },
+    )
 
     if "--no-auto-resume" in sys.argv:
         # A child drain pass: never orchestrate further. Just record terminal
@@ -2138,7 +2414,7 @@ def main() -> None:
         # accumulating since June 18 (1111 unevaluated rows across 2 months
         # by the time this was caught).
         rows = conn.execute(
-            "SELECT portal, job_id, title, company, url FROM seen_jobs "
+            "SELECT portal, job_id, title, company, url, is_external FROM seen_jobs "
             "WHERE fit_rating IN ('Unknown', '') OR fit_rating IS NULL"
         ).fetchall()
         # #6: re-evaluate the most relevant backlog first.
@@ -2147,7 +2423,7 @@ def main() -> None:
             rows = [r for _, r in sorted(zip(_rscores, rows), key=lambda p: p[0], reverse=True)]
         print(f"\n[redo] {len(rows)} Unknown/unevaluated jobs (all dates) to re-evaluate")
         candidates: list[dict] = []
-        for portal_name, job_id, title, company, url in rows:
+        for portal_name, job_id, title, company, url, is_external in rows:
             portal_cfg = portal_by_name.get(portal_name)
             if not portal_cfg:
                 # Portal was disabled/removed since this job was scraped, so there
@@ -2160,7 +2436,9 @@ def main() -> None:
                            "Portal no longer configured — out of scope, not evaluated.")
                 continue
             candidates.append({"portal_cfg": portal_cfg, "portal": portal_name, "job_id": job_id,
-                               "title": title or "", "company": company or "", "url": url or ""})
+                               "title": title or "", "company": company or "",
+                               "url": _listing_url(portal_name, job_id, {"url": url or ""}),
+                               "is_external": bool(is_external)})
         eval_count, stopped_for_memory = _evaluate_candidates(conn, candidates, eval_count, "redo pass")
         _finish_run(conn, "redo", eval_count, stopped_for_memory)
         return
@@ -2169,50 +2447,78 @@ def main() -> None:
     # evaluate yet — this lets us round-robin the eval budget across portals
     # afterward instead of letting a high-volume portal (jobindex) drain the
     # MAX_EVALUATIONS cap before smaller/later portals (jobbank-ca) get a turn.
-    portal_queues: list[tuple[dict, list[str]]] = []  # (portal_cfg, queue of job_ids)
-    found_by_portal: dict[str, dict[str, dict]] = {}
+    def _search_all_portals() -> tuple[list, dict, int]:
+        """One full search sweep across every portal. Returns
+        (portal_queues, found_by_portal, new_count). Resets the per-run portal
+        health lists so a retry sweep starts clean."""
+        RUN_STATS["portals_zero"].clear()
+        RUN_STATS["portals_error"].clear()
+        queues: list[tuple[dict, list[str]]] = []  # (portal_cfg, queue of job_ids)
+        found_all: dict[str, dict[str, dict]] = {}
+        new_count = 0
+        for portal_cfg in PORTALS:
+            portal_name = portal_cfg["name"]
+            id_field    = portal_cfg["id_field"]
+            print(f"\n[{portal_name}]")
+            _write_state(phase="searching", current_portal=portal_name, last_action=f"searching {portal_name}")
 
-    for portal_cfg in PORTALS:
-        portal_name = portal_cfg["name"]
-        id_field    = portal_cfg["id_field"]
-        print(f"\n[{portal_name}]")
-        _write_state(phase="searching", current_portal=portal_name, last_action=f"searching {portal_name}")
+            # Collect unique job IDs across all search queries for this portal
+            found: dict[str, dict] = {}  # job_id -> raw result dict
+            had_error = False
+            for search_args in portal_cfg["searches"]:
+                results, ok = run_cli(portal_cfg, search_args)
+                if not ok:
+                    had_error = True
+                for r in results:
+                    jid = str(r.get(id_field, ""))
+                    if jid and jid not in found:
+                        found[jid] = r
 
-        # Collect unique job IDs across all search queries for this portal
-        found: dict[str, dict] = {}  # job_id -> raw result dict
-        for search_args in portal_cfg["searches"]:
-            results = run_cli(portal_cfg, search_args)
-            for r in results:
-                jid = str(r.get(id_field, ""))
-                if jid and jid not in found:
-                    found[jid] = r
+            # Deduplicate against cache
+            new_ids = [jid for jid in found if not is_seen(conn, portal_name, jid)]
+            print(f"  {len(found)} found, {len(new_ids)} new")
+            # A CLI failure must NOT be reported as "0 listings" — that reads as a
+            # quiet day when the scan actually broke. Flag it distinctly; a genuine
+            # empty (search succeeded, nothing matched) stays portals_zero.
+            if had_error:
+                RUN_STATS["portals_error"].append(portal_name)
+            elif not found:
+                RUN_STATS["portals_zero"].append(portal_name)
 
-        # Deduplicate against cache
-        new_ids = [jid for jid in found if not is_seen(conn, portal_name, jid)]
-        print(f"  {len(found)} found, {len(new_ids)} new")
-        if not found:
-            # Zero listings from a portal that should have some is a coverage
-            # red flag (broken query, changed site, dead CLI) — surface it in
-            # the run-health banner rather than letting it pass as "nothing new".
-            RUN_STATS["portals_zero"].append(portal_name)
+            # #6: evaluate this portal's most relevant listings first, so a
+            # partial/paced finish still surfaces the best matches (never drops any).
+            if new_ids:
+                _rscores = _relevance_scores_for([found[jid].get("title", "") for jid in new_ids])
+                new_ids = [jid for _, jid in sorted(zip(_rscores, new_ids),
+                                                    key=lambda p: p[0], reverse=True)]
+            found_all[portal_name] = found
+            queues.append((portal_cfg, new_ids))
 
-        # #6: evaluate this portal's most relevant listings first, so a
-        # partial/paced finish still surfaces the best matches (never drops any).
-        if new_ids:
-            _rscores = _relevance_scores_for([found[jid].get("title", "") for jid in new_ids])
-            new_ids = [jid for _, jid in sorted(zip(_rscores, new_ids),
-                                                key=lambda p: p[0], reverse=True)]
-        found_by_portal[portal_name] = found
-        portal_queues.append((portal_cfg, new_ids))
+            for jid in new_ids:
+                r       = found[jid]
+                title   = r.get("title", "")
+                company = r.get("company", r.get("companyName", r.get("employer", r.get("hiringOrgName", ""))))
+                url     = _listing_url(portal_name, jid, r)
+                # Mark seen immediately — re-runs will skip even if evaluation fails
+                mark_seen(conn, portal_name, jid, title, company, url,
+                          is_external=bool(r.get("isExternal")))
+                new_count += 1
+        return queues, found_all, new_count
 
-        for jid in new_ids:
-            r       = found[jid]
-            title   = r.get("title", "")
-            company = r.get("company", r.get("companyName", r.get("employer", r.get("hiringOrgName", ""))))
-            url     = r.get("url", "")
-            # Mark seen immediately — re-runs will skip even if evaluation fails
-            mark_seen(conn, portal_name, jid, title, company, url)
-            total_new += 1
+    portal_queues, found_by_portal, total_new = _search_all_portals()
+
+    # All-portals-failed guard: if EVERY portal errored and nothing was found,
+    # the scan did not actually run (network/CLI outage) — that is NOT a quiet
+    # day. Say so loudly and retry the whole sweep once before giving up.
+    _all_names = {cfg["name"] for cfg in PORTALS}
+    if total_new == 0 and set(RUN_STATS["portals_error"]) >= _all_names:
+        _flag_issue("ALL portals failed to return results — the scan did not actually run "
+                    "(network/CLI failure), NOT a quiet day. Retrying the search sweep once...")
+        time.sleep(10)
+        portal_queues, found_by_portal, total_new = _search_all_portals()
+        if set(RUN_STATS["portals_error"]) >= _all_names:
+            _flag_issue("Retry also failed — every portal is still erroring. Today's scan is "
+                        "incomplete; re-run once connectivity/CLIs recover.")
 
     if populate_only:
         pass  # cache-only mode: skip detail fetch and evaluation entirely
@@ -2233,7 +2539,8 @@ def main() -> None:
                     "portal_cfg": portal_cfg, "portal": portal_cfg["name"], "job_id": jid,
                     "title": r.get("title", ""),
                     "company": r.get("company", r.get("companyName", r.get("employer", r.get("hiringOrgName", "")))),
-                    "url": r.get("url", ""),
+                    "url": _listing_url(portal_cfg["name"], jid, r),
+                    "is_external": bool(r.get("isExternal")),
                 })
         eval_count, stopped_for_memory = _evaluate_candidates(
             conn, candidates, eval_count, "main pass", collect_into=new_jobs, verbose=True)

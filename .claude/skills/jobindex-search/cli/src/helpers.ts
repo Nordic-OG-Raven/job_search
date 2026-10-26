@@ -64,6 +64,63 @@ export async function htmlFetch(url: string): Promise<string> {
   throw new Error("Request failed after max retries")
 }
 
+/**
+ * Best-effort HTML fetch that never throws — returns null on any error, a
+ * non-OK status, or timeout. Used to enrich a thin jobindex teaser from the
+ * external Apply URL without ever letting that secondary fetch break (or slow
+ * down past the timeout) the primary detail call.
+ */
+export async function fetchHtmlSafe(url: string, timeoutMs = 15000): Promise<string | null> {
+  try {
+    const response = await fetch(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (compatible; jobindex-cli/1.0)",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "da,en;q=0.9",
+      },
+      redirect: "follow",
+      signal: AbortSignal.timeout(timeoutMs),
+    })
+    if (!response.ok) return null
+    return await response.text()
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Extract the main job-description text from an arbitrary external ATS page.
+ * Prefers a JSON-LD JobPosting.description (clean, structured); otherwise
+ * strips non-content regions (script/style/nav/header/footer/form) and tags
+ * and collapses whitespace. Best-effort — ATS pages vary and some are
+ * JS-rendered SPAs that yield little, in which case the caller keeps the teaser.
+ */
+export function extractMainText(html: string): string {
+  for (const m of html.matchAll(/<script[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi)) {
+    try {
+      const j = JSON.parse(m[1].replace(/[\u0000-\u001F]/g, " "))
+      const nodes = Array.isArray(j) ? j : (Array.isArray(j["@graph"]) ? j["@graph"] : [j])
+      for (const n of nodes) {
+        if (n && n["@type"] === "JobPosting" && n.description) {
+          return decodeHtmlEntities(stripTags(String(n.description))).replace(/[ \t]+/g, " ").trim()
+        }
+      }
+    } catch {
+      /* fall through to generic extraction */
+    }
+  }
+  // NB: do NOT strip <form> — many ATS (notably hr-manager, an ASP.NET
+  // WebForms app used across Danish public-sector jobs) wrap the ENTIRE page,
+  // job description included, in a single <form>, so stripping it would drop
+  // all content. The trade-off is some form-label noise, which is acceptable.
+  let s = html
+    .replace(/<(script|style|noscript|svg|head|nav|header|footer)[^>]*>[\s\S]*?<\/\1>/gi, " ")
+    .replace(/<\/(p|div|li|br|h[1-6]|tr)>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+  s = decodeHtmlEntities(s)
+  return s.replace(/[ \t]+/g, " ").replace(/\n{2,}/g, "\n").replace(/^\s+|\s+$/gm, "").trim()
+}
+
 export interface JobCard {
   id: string
   title: string
